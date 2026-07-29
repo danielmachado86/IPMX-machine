@@ -1,0 +1,64 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:IPMX-test}",
+            "name": "Debug ipmx-encoder",
+            "target": "ipmx-encoder",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug ipmx-encoder"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:IPMX-test}",
+            "name": "Release ipmx-encoder",
+            "target": "ipmx-encoder",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release ipmx-encoder"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:IPMX-test}",
+            "name": "Debug ipmx-decoder",
+            "target": "ipmx-decoder",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug ipmx-decoder"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:IPMX-test}",
+            "name": "Release ipmx-decoder",
+            "target": "ipmx-decoder",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release ipmx-decoder"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:IPMX-test}",
+            "name": "Debug ipmx-selftest",
+            "target": "ipmx-selftest",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug ipmx-selftest"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:IPMX-test}",
+            "name": "Release ipmx-selftest",
+            "target": "ipmx-selftest",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release ipmx-selftest"
+        }
+    ]
+}

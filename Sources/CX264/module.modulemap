@@ -1,0 +1,5 @@
+module CX264 [system] {
+    header "shim.h"
+    link "x264"
+    export *
+}
