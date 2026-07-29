@@ -41,7 +41,7 @@ guard width % 2 == 0, height % 2 == 0 else {
     exit(1)
 }
 
-let frameRate = options.int("fps", default: 30)
+let frameRate = options.int("fps", default: 60)
 let bitrateKbps = options.int("bitrate", default: 8000)
 let gopSeconds = min(options.int("gop", default: 2), 5)   // TR-10-15 §11: RAP at least every 5 s
 let destination = options.string("dest", default: "239.10.10.10")

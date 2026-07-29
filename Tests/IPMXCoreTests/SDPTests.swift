@@ -16,7 +16,7 @@ struct SDPTests {
             payloadType: 96,
             width: 1920,
             height: 1080,
-            frameRate: 30,
+            frameRate: 60,
             maxBitrateKbps: 8000,
             profileLevelID: ParameterSets.profileLevelID(sps: sps),
             spropParameterSets: ParameterSets.sprop(sps: sps, pps: pps)

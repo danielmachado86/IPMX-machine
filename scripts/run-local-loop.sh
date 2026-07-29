@@ -5,9 +5,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-WIDTH="${WIDTH:-1280}"
-HEIGHT="${HEIGHT:-720}"
-FPS="${FPS:-30}"
+WIDTH="${WIDTH:-1920}"
+HEIGHT="${HEIGHT:-1080}"
+FPS="${FPS:-60}"
 PORT="${PORT:-50000}"
 
 echo "building..."
