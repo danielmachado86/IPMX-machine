@@ -12,5 +12,6 @@ sdp/stream.sdp
 *.pcapng
 *.h264
 *.264
+*.sdp
 
 .DS_Store
