@@ -1,0 +1,13 @@
+v=0
+o=- 2509532913 2509532913 IN IP4 127.0.0.1
+s=IPMX Phase 0
+t=0 0
+c=IN IP4 239.10.10.10/64
+m=video 50000 RTP/AVP 96
+b=AS:8000
+a=rtpmap:96 H265/90000
+a=fmtp:96 width=1920; height=1080; exactframerate=60; sampling=YCbCr-4:2:0; depth=8; colorimetry=BT709; TCS=SDR; RANGE=NARROW; TP=2110TPW; MAXUDP=1460; profile-space=0; profile-id=1; tier-flag=0; level-id=123; profile-compatibility-indicator=60000000; interop-constraints=900000000000; sprop-vps=QAEMAf//AWAAAAMAkAAAAwAAAwB7ugJA; sprop-sps=QgEBAWAAAAMAkAAAAwAAAwB7oAPAgBDllupJMrmoCAgIIAAAAwAgAAAHgQ==; sprop-pps=RAHBcrRiQA==
+a=ts-refclk:localmac
+a=mediaclk:direct=0
+a=mid:VID
+a=sendonly

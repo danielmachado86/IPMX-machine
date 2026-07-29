@@ -5,49 +5,40 @@ import IPMXCore
 
 /// Thin wrapper over libx264.
 ///
-/// x264 rather than VideoToolbox on purpose: TR-10-15 §10 requires HRD Type II with
-/// Buffering Period and Picture Timing SEI, and VideoToolbox exposes no way to configure
-/// HRD or to inject SEI. x264 emits all of it from `--nal-hrd`. Phase 0 does not switch
-/// HRD on yet (see `enableHRD`), but starting here means Phase 1 is a flag flip rather
-/// than a bitstream-rewriting project.
-final class X264Encoder {
-    struct Configuration {
-        var width: Int
-        var height: Int
-        var frameRate: Int
-        var bitrateKbps: Int
-        /// TR-10-15 §11 requires a random access point at least every 5 s. 2 s is friendlier
-        /// to a receiver that joins late.
-        var keyframeIntervalSeconds: Int = 2
-        /// Not "ultrafast": that preset turns off CABAC and the 8x8 transform, and
-        /// x264_param_apply_profile only ever *restricts* the toolset, so the encoder
-        /// silently emits Constrained Baseline. TR-10-15 §12 requires High or Main.
-        var preset: String = "veryfast"
-        var tune: String = "zerolatency"
-        var profile: String = "high"
-        /// Phase 1 switch. Turning this on makes x264 emit nal_hrd_parameters plus the
-        /// Buffering Period / Picture Timing SEI that TR-10-15 §10 mandates.
-        var enableHRD: Bool = false
-    }
+/// x264 rather than VideoToolbox on purpose: TR-10-15 Part 3 §10 requires HRD Type II with
+/// Buffering Period and Picture Timing SEI, and VideoToolbox exposes no way to configure HRD
+/// or to inject SEI. x264 emits all of it from `--nal-hrd`. Phase 0 does not switch HRD on
+/// yet (see `enableHRD`), but starting here means Phase 1 is a flag flip rather than a
+/// bitstream-rewriting project.
+final class X264Encoder: VideoEncoder {
+    let codec = VideoCodec.h264
 
     private var handle: OpaquePointer?
     private var picture = x264_picture_t()
-    private let configuration: Configuration
+    private let configuration: EncoderConfiguration
 
-    /// SPS and PPS as produced by the encoder, for the SDP `sprop-parameter-sets`.
-    private(set) var sps: NALUnit?
-    private(set) var pps: NALUnit?
+    private var sps: NALUnit?
+    private var pps: NALUnit?
 
-    init(configuration: Configuration) throws {
+    var formatParameters: VideoFormatParameters? {
+        guard let sps, let pps else { return nil }
+        return .h264(H264FormatParameters(
+            profileLevelID: ParameterSets.profileLevelID(sps: sps),
+            spropParameterSets: ParameterSets.sprop(sps: sps, pps: pps)
+        ))
+    }
+
+    init(configuration: EncoderConfiguration) throws {
         self.configuration = configuration
 
         var params = x264_param_t()
-        guard x264_param_default_preset(&params, configuration.preset, configuration.tune) == 0 else {
-            throw EncoderError.parameterSetup("unknown preset/tune \(configuration.preset)/\(configuration.tune)")
+        guard x264_param_default_preset(&params, configuration.preset, "zerolatency") == 0 else {
+            throw EncoderError.parameterSetup("unknown preset \(configuration.preset)")
         }
 
         // ScreenCaptureKit hands us biplanar 4:2:0, which is exactly x264's NV12 input CSP —
-        // no colour conversion needed anywhere in the pipeline.
+        // no colour conversion needed anywhere in the H.264 path. x265 is not so accommodating,
+        // see ChromaDeinterleaver.
         params.i_csp = Int32(X264_CSP_NV12)
         params.i_width = Int32(configuration.width)
         params.i_height = Int32(configuration.height)
@@ -61,13 +52,13 @@ final class X264Encoder {
         params.b_aud = 0
         params.i_keyint_max = Int32(configuration.frameRate * configuration.keyframeIntervalSeconds)
 
-        // TR-10-15 §10: decode order shall equal output order, max_num_reorder_frames = 0.
+        // TR-10-15 Part 3 §10: decode order shall equal output order, max_num_reorder_frames = 0.
         params.i_bframe = 0
         params.b_open_gop = 0
         params.i_sync_lookahead = 0
 
-        // VUI. TR-10-15 §8 wants the colour description present; BT.709 narrow range is what
-        // ScreenCaptureKit gives us with the video-range pixel format.
+        // VUI. TR-10-15 Part 3 §8 wants the colour description present; BT.709 narrow range is
+        // what ScreenCaptureKit gives us with the video-range pixel format.
         params.vui.b_fullrange = 0
         params.vui.i_colorprim = 1          // BT.709
         params.vui.i_transfer = 1           // BT.709
@@ -83,8 +74,8 @@ final class X264Encoder {
         }
 
         // Guarantee the tools each profile is defined by, whatever the preset turned off.
-        // Without this a fast preset quietly downgrades the stream below what TR-10-15 §12
-        // allows, and nothing in the API complains.
+        // Without this a fast preset quietly downgrades the stream below what TR-10-15 Part 3
+        // §12 allows, and nothing in the API complains.
         switch configuration.profile {
         case "high":
             params.b_cabac = 1
@@ -101,7 +92,7 @@ final class X264Encoder {
 
         // x264_t is opaque, so Swift already imports `x264_t *` as OpaquePointer.
         guard let opened = ipmx_x264_encoder_open(&params) else {
-            throw EncoderError.open
+            throw EncoderError.open("x264_encoder_open failed")
         }
         handle = opened
 
@@ -109,7 +100,7 @@ final class X264Encoder {
         picture.img.i_csp = Int32(X264_CSP_NV12)
         picture.img.i_plane = 2
 
-        Log.info("x264 build \(ipmx_x264_build_number()), \(configuration.width)x\(configuration.height)@\(configuration.frameRate), \(configuration.bitrateKbps) kbps, HRD \(configuration.enableHRD ? "on" : "off")")
+        Log.info("x264 build \(ipmx_x264_build_number()), \(configuration.width)x\(configuration.height)@\(configuration.frameRate), \(configuration.bitrateKbps) kbps, profile \(configuration.profile), HRD \(configuration.enableHRD ? "on" : "off")")
     }
 
     deinit {
@@ -118,8 +109,6 @@ final class X264Encoder {
         }
     }
 
-    /// Encodes one NV12 CVPixelBuffer. Returns the NAL units of the resulting access unit,
-    /// or an empty array when x264 produced no output for this input.
     func encode(pixelBuffer: CVPixelBuffer, presentationTimestamp: Int64) throws -> [NALUnit] {
         guard let handle else { return [] }
 
@@ -145,7 +134,7 @@ final class X264Encoder {
         var outputPicture = x264_picture_t()
 
         let size = x264_encoder_encode(handle, &nalPointer, &nalCount, &picture, &outputPicture)
-        guard size >= 0 else { throw EncoderError.encode }
+        guard size >= 0 else { throw EncoderError.encode("x264_encoder_encode returned \(size)") }
         guard size > 0, let nals = nalPointer, nalCount > 0 else { return [] }
 
         var units: [NALUnit] = []
@@ -155,7 +144,7 @@ final class X264Encoder {
             guard let payload = nal.p_payload, nal.i_payload > 0 else { continue }
             // p_payload includes the Annex B start code; split() strips it.
             let framed = Data(bytes: payload, count: Int(nal.i_payload))
-            units.append(contentsOf: AnnexB.split(framed))
+            units.append(contentsOf: AnnexB.split(framed, codec: .h264))
         }
 
         captureParameterSets(from: units)
@@ -166,22 +155,6 @@ final class X264Encoder {
         for unit in units {
             if unit.typeValue == H264NALType.sps.rawValue, sps == nil { sps = unit }
             if unit.typeValue == H264NALType.pps.rawValue, pps == nil { pps = unit }
-        }
-    }
-
-    enum EncoderError: Error, CustomStringConvertible {
-        case parameterSetup(String)
-        case open
-        case encode
-        case unexpectedPixelFormat
-
-        var description: String {
-            switch self {
-            case .parameterSetup(let detail): return "x264 parameter setup failed: \(detail)"
-            case .open:                       return "x264_encoder_open failed"
-            case .encode:                     return "x264_encoder_encode failed"
-            case .unexpectedPixelFormat:      return "expected a biplanar 4:2:0 (NV12) pixel buffer"
-            }
         }
     }
 }

@@ -1,0 +1,5 @@
+module CX265 [system] {
+    header "shim.h"
+    link "x265"
+    export *
+}

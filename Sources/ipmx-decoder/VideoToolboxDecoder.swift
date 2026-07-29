@@ -4,7 +4,7 @@ import Foundation
 import IPMXCore
 import VideoToolbox
 
-/// Hardware H.264 decode through VideoToolbox.
+/// Hardware H.264 / H.265 decode through VideoToolbox.
 ///
 /// Unlike the encode side, there is no reason to avoid VideoToolbox here: decoding has no
 /// HRD-signalling requirement to satisfy, and the M-series media engine does this for
@@ -12,17 +12,27 @@ import VideoToolbox
 final class VideoToolboxDecoder {
     typealias FrameHandler = (CVImageBuffer, CMTime) -> Void
 
+    let codec: VideoCodec
+
     private var session: VTDecompressionSession?
     private var formatDescription: CMVideoFormatDescription?
-    private var sps: Data?
-    private var pps: Data?
+    private var parameterSets: [UInt8: Data] = [:]
     private var sawKeyframe = false
     private let handler: FrameHandler
 
     private(set) var framesDecoded: UInt64 = 0
     private(set) var framesDropped: UInt64 = 0
 
-    init(handler: @escaping FrameHandler) {
+    /// The order VideoToolbox expects. H.265 needs all three; H.264 only the two.
+    private var requiredParameterSetTypes: [UInt8] {
+        switch codec {
+        case .h264: return [H264NALType.sps.rawValue, H264NALType.pps.rawValue]
+        case .h265: return [H265NALType.vps.rawValue, H265NALType.sps.rawValue, H265NALType.pps.rawValue]
+        }
+    }
+
+    init(codec: VideoCodec, handler: @escaping FrameHandler) {
+        self.codec = codec
         self.handler = handler
     }
 
@@ -34,24 +44,33 @@ final class VideoToolboxDecoder {
     }
 
     /// Decodes one access unit. Parameter sets are absorbed into the format description;
-    /// everything before the first IDR is discarded, since VideoToolbox cannot start on a
-    /// non-recovery point.
+    /// everything before the first random access point is discarded, since VideoToolbox
+    /// cannot start mid-GOP.
     func decode(accessUnit units: [NALUnit], timestamp: UInt32) {
         var parameterSetsChanged = false
         var payload: [NALUnit] = []
 
         for unit in units {
-            switch unit.typeValue {
-            case H264NALType.sps.rawValue:
-                if sps != unit.bytes { sps = unit.bytes; parameterSetsChanged = true }
-            case H264NALType.pps.rawValue:
-                if pps != unit.bytes { pps = unit.bytes; parameterSetsChanged = true }
-            case H264NALType.aud.rawValue, H264NALType.filler.rawValue:
-                break                                    // not carried in AVCC sample data
-            default:
+            guard unit.codec == codec else { continue }
+
+            if unit.isParameterSet {
+                if parameterSets[unit.typeValue] != unit.bytes {
+                    parameterSets[unit.typeValue] = unit.bytes
+                    parameterSetsChanged = true
+                }
+            } else if unit.isDiscardableFromSampleData {
+                continue                                  // AUD and filler stay out of the sample
+            } else {
                 payload.append(unit)
                 if unit.isKeyframe { sawKeyframe = true }
             }
+        }
+
+        // The single most useful line when a stream will not start: it shows whether the
+        // random access point is arriving at all, and whether the NAL types are being read
+        // with the right codec.
+        if Log.verbose {
+            Log.debug("access unit ts=\(timestamp) NAL types \(units.map(\.typeValue)) keyframe=\(units.contains { $0.isKeyframe })")
         }
 
         if parameterSetsChanged {
@@ -88,34 +107,53 @@ final class VideoToolboxDecoder {
     }
 
     private func rebuildSession() {
-        guard let sps, let pps else { return }
+        let types = requiredParameterSetTypes
+        guard types.allSatisfy({ parameterSets[$0] != nil }) else { return }
+
+        // Copy the parameter sets into flat buffers so the C arrays of pointers stay valid
+        // for the duration of the call. They are tens of bytes each.
+        var buffers: [UnsafeMutablePointer<UInt8>] = []
+        var pointers: [UnsafePointer<UInt8>] = []
+        var sizes: [Int] = []
+        for type in types {
+            let data = parameterSets[type]!
+            let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: data.count)
+            data.copyBytes(to: buffer, count: data.count)
+            buffers.append(buffer)
+            pointers.append(UnsafePointer(buffer))
+            sizes.append(data.count)
+        }
+        defer { buffers.forEach { $0.deallocate() } }
 
         var newFormat: CMVideoFormatDescription?
-        let created: OSStatus = sps.withUnsafeBytes { spsRaw in
-            pps.withUnsafeBytes { ppsRaw in
-                guard let spsBase = spsRaw.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                      let ppsBase = ppsRaw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                    return OSStatus(-1)
-                }
-                let pointers: [UnsafePointer<UInt8>] = [spsBase, ppsBase]
-                let sizes: [Int] = [sps.count, pps.count]
-                return pointers.withUnsafeBufferPointer { pointerBuffer in
-                    sizes.withUnsafeBufferPointer { sizeBuffer in
-                        CMVideoFormatDescriptionCreateFromH264ParameterSets(
-                            allocator: kCFAllocatorDefault,
-                            parameterSetCount: 2,
-                            parameterSetPointers: pointerBuffer.baseAddress!,
-                            parameterSetSizes: sizeBuffer.baseAddress!,
-                            nalUnitHeaderLength: 4,          // matches AnnexB.lengthPrefixed
-                            formatDescriptionOut: &newFormat
-                        )
-                    }
+        let created: OSStatus = pointers.withUnsafeBufferPointer { pointerBuffer in
+            sizes.withUnsafeBufferPointer { sizeBuffer in
+                switch codec {
+                case .h264:
+                    return CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                        allocator: kCFAllocatorDefault,
+                        parameterSetCount: pointerBuffer.count,
+                        parameterSetPointers: pointerBuffer.baseAddress!,
+                        parameterSetSizes: sizeBuffer.baseAddress!,
+                        nalUnitHeaderLength: 4,           // matches AnnexB.lengthPrefixed
+                        formatDescriptionOut: &newFormat
+                    )
+                case .h265:
+                    return CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                        allocator: kCFAllocatorDefault,
+                        parameterSetCount: pointerBuffer.count,
+                        parameterSetPointers: pointerBuffer.baseAddress!,
+                        parameterSetSizes: sizeBuffer.baseAddress!,
+                        nalUnitHeaderLength: 4,
+                        extensions: nil,
+                        formatDescriptionOut: &newFormat
+                    )
                 }
             }
         }
 
         guard created == noErr, let newFormat else {
-            Log.error("could not build a format description from SPS/PPS (status \(created))")
+            Log.error("could not build a \(codec.rawValue) format description from the parameter sets (status \(created))")
             return
         }
 
@@ -150,7 +188,7 @@ final class VideoToolboxDecoder {
         formatDescription = newFormat
 
         let dimensions = CMVideoFormatDescriptionGetDimensions(newFormat)
-        Log.info("decoder ready: \(dimensions.width)x\(dimensions.height)")
+        Log.info("\(codec.rawValue) decoder ready: \(dimensions.width)x\(dimensions.height)")
     }
 
     private func makeSampleBuffer(data: Data,

@@ -4,7 +4,7 @@ import Foundation
 import IPMXCore
 
 // ipmx-encoder — Phase 0
-// ScreenCaptureKit -> x264 -> RFC 6184 -> UDP multicast.
+// ScreenCaptureKit -> x264/x265 -> RFC 6184/7798 -> UDP multicast.
 // No RTCP, no NMOS, no PTP. The SDP is written to disk for the decoder to read.
 
 let options = CommandLineOptions()
@@ -13,26 +13,34 @@ if options.flag("help") {
     print("""
     ipmx-encoder — IPMX Phase 0 sender
 
+      --codec <name>       h264 | h265                (default h264)
       --dest <ip>          destination address        (default 239.10.10.10)
       --port <n>           destination UDP port, even and >5000 per TR-10-7 §7 (default 50000)
       --iface <ip>         local egress interface     (default: first non-loopback IPv4)
       --width <n>          capture width              (default 1920)
       --height <n>         capture height             (default 1080)
-      --fps <n>            frame rate                 (default 30)
+      --fps <n>            frame rate                 (default 60)
       --bitrate <kbps>     target bitrate             (default 8000)
       --gop <seconds>      keyframe interval, TR-10-15 §11 caps this at 5 (default 2)
       --display <index>    display to capture         (default 0)
-      --preset <name>      x264 preset                (default veryfast)
-      --profile <name>     high | main                (default high, per TR-10-15 §12)
+      --preset <name>      x264/x265 preset           (default veryfast)
+      --profile <name>     h264: high | main          (default high, per TR-10-15 Part 3 §12)
+                           h265: main                 (default main, per TR-10-15 Part 2 §12)
       --sdp <path>         where to write the SDP     (default sdp/stream.sdp)
       --mtu <bytes>        max RTP payload            (default 1400)
-      --hrd                enable x264 HRD signalling (Phase 1 preview)
+      --hrd                enable HRD signalling      (Phase 1 preview)
       --verbose
     """)
     exit(0)
 }
 
 Log.verbose = options.flag("verbose")
+
+let codecName = options.string("codec", default: "h264")
+guard let codec = VideoCodec(argument: codecName) else {
+    Log.error("unknown codec '\(codecName)'; expected h264 or h265")
+    exit(1)
+}
 
 let width = options.int("width", default: 1920)
 let height = options.int("height", default: 1080)
@@ -59,24 +67,31 @@ if port <= 5000 {
 
 // MARK: - Pipeline
 
-let encoder: X264Encoder
+let encoder: VideoEncoder
 let sender: RTPStreamSender
 
 do {
-    encoder = try X264Encoder(configuration: .init(
+    let configuration = EncoderConfiguration(
         width: width,
         height: height,
         frameRate: frameRate,
         bitrateKbps: bitrateKbps,
         keyframeIntervalSeconds: gopSeconds,
         preset: options.string("preset", default: "veryfast"),
-        profile: options.string("profile", default: "high"),
+        profile: options.string("profile", default: codec == .h264 ? "high" : "main"),
         enableHRD: options.flag("hrd")
-    ))
+    )
+
+    switch codec {
+    case .h264: encoder = try X264Encoder(configuration: configuration)
+    case .h265: encoder = try X265Encoder(configuration: configuration)
+    }
 
     let socket = try UDPSender(host: destination, port: port, interface: interface)
-    sender = RTPStreamSender(socket: socket, packetizer: H264Packetizer(maxPayloadSize: mtu))
-    Log.info("sending to \(socket.destinationDescription), SSRC 0x\(String(sender.ssrc, radix: 16))")
+    sender = RTPStreamSender(socket: socket,
+                             packetizer: VideoPacketizer(codec: codec, maxPayloadSize: mtu))
+    Log.info("sending \(codec.rawValue) to \(socket.destinationDescription), SSRC 0x\(String(sender.ssrc, radix: 16))")
+    Log.debug("payload format: \(codec.specReference)")
 } catch {
     Log.error("\(error)")
     exit(1)
@@ -95,7 +110,7 @@ let counters = Counters()
 func writeSDPIfReady() {
     counters.lock.lock()
     defer { counters.lock.unlock() }
-    guard !counters.sdpWritten, let sps = encoder.sps, let pps = encoder.pps else { return }
+    guard !counters.sdpWritten, let formatParameters = encoder.formatParameters else { return }
 
     let description = SDPDescription(
         originAddress: interface,
@@ -106,8 +121,7 @@ func writeSDPIfReady() {
         height: height,
         frameRate: frameRate,
         maxBitrateKbps: bitrateKbps,
-        profileLevelID: ParameterSets.profileLevelID(sps: sps),
-        spropParameterSets: ParameterSets.sprop(sps: sps, pps: pps)
+        formatParameters: formatParameters
     )
 
     let url = URL(fileURLWithPath: sdpPath)

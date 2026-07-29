@@ -10,14 +10,14 @@ public final class RTPStreamSender {
     public let ssrc: UInt32
 
     private let socket: UDPSender
-    private let packetizer: H264Packetizer
+    private let packetizer: VideoPacketizer
     private var sequenceNumber: UInt16
 
     public private(set) var packetsSent: UInt64 = 0
     public private(set) var bytesSent: UInt64 = 0
 
     public init(socket: UDPSender,
-                packetizer: H264Packetizer,
+                packetizer: VideoPacketizer,
                 payloadType: UInt8 = 96,
                 ssrc: UInt32 = UInt32.random(in: 1...UInt32.max)) {
         self.socket = socket

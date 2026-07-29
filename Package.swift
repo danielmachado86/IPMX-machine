@@ -17,24 +17,30 @@ let package = Package(
         .library(name: "IPMXCore", targets: ["IPMXCore"]),
     ],
     targets: [
-        // x264 from Homebrew. `brew install x264 pkg-config`
+        // x264 and x265 from Homebrew. `brew install x264 x265 pkg-config`
         .systemLibrary(
             name: "CX264",
             path: "Sources/CX264",
             pkgConfig: "x264",
             providers: [.brew(["x264"])]
         ),
+        .systemLibrary(
+            name: "CX265",
+            path: "Sources/CX265",
+            pkgConfig: "x265",
+            providers: [.brew(["x265"])]
+        ),
 
         // Transport + bitstream plumbing shared by both ends.
         .target(name: "IPMXCore"),
 
-        // ScreenCaptureKit -> x264 -> RFC 6184 -> UDP
+        // ScreenCaptureKit -> x264/x265 -> RFC 6184/7798 -> UDP
         .executableTarget(
             name: "ipmx-encoder",
-            dependencies: ["IPMXCore", "CX264"]
+            dependencies: ["IPMXCore", "CX264", "CX265"]
         ),
 
-        // UDP -> RFC 6184 -> VideoToolbox -> AVSampleBufferDisplayLayer
+        // UDP -> RFC 6184/7798 -> VideoToolbox -> AVSampleBufferDisplayLayer
         .executableTarget(
             name: "ipmx-decoder",
             dependencies: ["IPMXCore"]

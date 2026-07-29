@@ -5,7 +5,7 @@ import Foundation
 import IPMXCore
 
 // ipmx-decoder — Phase 0
-// UDP multicast -> RFC 6184 -> VideoToolbox -> AVSampleBufferDisplayLayer.
+// UDP multicast -> RFC 6184/7798 -> VideoToolbox -> AVSampleBufferDisplayLayer.
 
 let options = CommandLineOptions()
 
@@ -13,10 +13,11 @@ if options.flag("help") {
     print("""
     ipmx-decoder — IPMX Phase 0 receiver
 
+      --codec <name>   h264 | h265, ignored when --sdp says otherwise (default h264)
       --group <ip>     multicast group or local address to bind (default 239.10.10.10)
       --port <n>       UDP port                                 (default 50000)
       --iface <ip>     interface to join the group on           (default: first non-loopback IPv4)
-      --sdp <path>     read transport + parameter sets from an SDP instead of the flags above
+      --sdp <path>     read transport, codec and parameter sets from an SDP
       --width <n>      initial window width                     (default 1280)
       --height <n>     initial window height                    (default 720)
       --verbose
@@ -26,9 +27,15 @@ if options.flag("help") {
 
 Log.verbose = options.flag("verbose")
 
+let codecName = options.string("codec", default: "h264")
+guard var codec = VideoCodec(argument: codecName) else {
+    Log.error("unknown codec '\(codecName)'; expected h264 or h265")
+    exit(1)
+}
+
 var group = options.string("group", default: "239.10.10.10")
 var port = options.uint16("port", default: 50000)
-var spropParameterSets: String?
+var seedParameterSets: [NALUnit] = []
 
 // An SDP on the command line wins over the individual flags: it is what a real IS-05
 // connection would hand us, so exercising that path early keeps Phase 4 honest.
@@ -37,8 +44,9 @@ if let sdpPath = options.optionalString("sdp"),
     let transport = SDPDescription.parseTransport(text)
     if let address = transport.address { group = address }
     if let sdpPort = transport.port { port = sdpPort }
-    spropParameterSets = transport.sprop
-    Log.info("loaded transport from \(sdpPath): \(group):\(port)")
+    if let sdpCodec = transport.codec { codec = sdpCodec }
+    seedParameterSets = transport.parameterSets
+    Log.info("loaded transport from \(sdpPath): \(codec.rawValue) on \(group):\(port)")
 }
 
 let interface = options.optionalString("iface") ?? IPv4.defaultInterfaceAddress()
@@ -49,38 +57,37 @@ application.setActivationPolicy(.regular)
 let player = PlayerWindow(
     width: options.int("width", default: 1280),
     height: options.int("height", default: 720),
-    title: "IPMX Phase 0 — waiting for \(group):\(port)"
+    title: "IPMX Phase 0 — waiting for \(codec.rawValue) on \(group):\(port)"
 )
 
-let decoder = VideoToolboxDecoder { imageBuffer, presentationTime in
+let decoder = VideoToolboxDecoder(codec: codec) { imageBuffer, presentationTime in
     DispatchQueue.main.async {
         player.present(imageBuffer: imageBuffer, presentationTime: presentationTime)
     }
 }
 
-// Seeding the decoder from the SDP means a receiver joining between keyframes can start on
-// the next non-IDR-free access unit rather than waiting for the next IDR. With
-// b_repeat_headers on the sender it rarely matters, but it is the behaviour IS-05 implies.
-if let sprop = spropParameterSets {
-    let sets = ParameterSets.decodeSprop(sprop)
-    if !sets.isEmpty {
-        decoder.decode(accessUnit: sets, timestamp: 0)
-        Log.info("seeded \(sets.count) parameter set(s) from the SDP")
-    }
+// Seeding from the SDP lets the decoder build its format description before the first
+// in-band parameter sets arrive. With repeat-headers on the sender it rarely matters, but it
+// is the behaviour IS-05 implies.
+if !seedParameterSets.isEmpty {
+    decoder.decode(accessUnit: seedParameterSets, timestamp: 0)
+    Log.info("seeded \(seedParameterSets.count) parameter set(s) from the SDP")
 }
 
 let receiver: UDPReceiver
 do {
     receiver = try UDPReceiver(group: group, port: port, interface: interface)
     Log.info("listening on \(group):\(port) via \(interface)")
+    Log.debug("payload format: \(codec.specReference)")
     Log.debug("SO_RCVBUF = \(receiver.actualReceiveBufferBytes()) bytes")
 } catch {
     Log.error("\(error)")
     exit(1)
 }
 
+let activeCodec = codec
 let networkThread = Thread {
-    let depacketizer = H264Depacketizer()
+    let depacketizer = VideoDepacketizer(codec: activeCodec)
     var lastReport = MonotonicClock.now()
     var packets: UInt64 = 0
 
@@ -110,7 +117,9 @@ let networkThread = Thread {
                                  decoder.framesDecoded, decoder.framesDropped,
                                  depacketizer.lostPackets, packets)
             Log.info(summary)
-            DispatchQueue.main.async { player.updateTitle("IPMX Phase 0 — \(summary)") }
+            DispatchQueue.main.async {
+                player.updateTitle("IPMX Phase 0 \(activeCodec.rawValue) — \(summary)")
+            }
         }
     }
 }

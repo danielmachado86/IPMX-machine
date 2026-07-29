@@ -14,39 +14,52 @@ import XCTest
 final class PacketizationThroughputTests: XCTestCase {
 
     /// A keyframe-sized NAL: 1080p intra frames land in this range at broadcast bitrates.
-    private static let keyframeNAL = NALUnit(
-        bytes: Data([0x65] + (0..<200_000).map { UInt8($0 % 251) })
-    )
+    private static let h264Keyframe = TestNAL.slice(codec: .h264, size: 200_000)
+    private static let h265Keyframe = TestNAL.slice(codec: .h265, size: 200_000)
+    private static let h264Delta = TestNAL.slice(codec: .h264, size: 20_000)
+    private static let h265Delta = TestNAL.slice(codec: .h265, size: 20_000)
 
-    private static let deltaNAL = NALUnit(
-        bytes: Data([0x41] + (0..<20_000).map { UInt8($0 % 251) })
-    )
-
-    func testPacketizeKeyframeThroughput() {
-        let packetizer = H264Packetizer(maxPayloadSize: 1400)
+    func testPacketizeH264KeyframeThroughput() {
+        let packetizer = VideoPacketizer(codec: .h264, maxPayloadSize: 1400)
         measure {
-            for _ in 0..<50 {
-                _ = packetizer.packetize(accessUnit: [Self.keyframeNAL])
-            }
+            for _ in 0..<50 { _ = packetizer.packetize(accessUnit: [Self.h264Keyframe]) }
         }
     }
 
-    func testPacketizeDeltaFrameThroughput() {
-        let packetizer = H264Packetizer(maxPayloadSize: 1400)
+    func testPacketizeH265KeyframeThroughput() {
+        let packetizer = VideoPacketizer(codec: .h265, maxPayloadSize: 1400)
         measure {
-            for _ in 0..<500 {
-                _ = packetizer.packetize(accessUnit: [Self.deltaNAL])
-            }
+            for _ in 0..<50 { _ = packetizer.packetize(accessUnit: [Self.h265Keyframe]) }
         }
     }
 
-    func testRoundTripThroughput() {
-        let packetizer = H264Packetizer(maxPayloadSize: 1400)
-        let payloads = packetizer.packetize(accessUnit: [Self.deltaNAL])
+    func testPacketizeH264DeltaFrameThroughput() {
+        let packetizer = VideoPacketizer(codec: .h264, maxPayloadSize: 1400)
+        measure {
+            for _ in 0..<500 { _ = packetizer.packetize(accessUnit: [Self.h264Delta]) }
+        }
+    }
 
+    func testPacketizeH265DeltaFrameThroughput() {
+        let packetizer = VideoPacketizer(codec: .h265, maxPayloadSize: 1400)
+        measure {
+            for _ in 0..<500 { _ = packetizer.packetize(accessUnit: [Self.h265Delta]) }
+        }
+    }
+
+    func testH264RoundTripThroughput() {
+        measureRoundTrip(codec: .h264, unit: Self.h264Delta)
+    }
+
+    func testH265RoundTripThroughput() {
+        measureRoundTrip(codec: .h265, unit: Self.h265Delta)
+    }
+
+    private func measureRoundTrip(codec: VideoCodec, unit: NALUnit) {
+        let payloads = VideoPacketizer(codec: codec, maxPayloadSize: 1400).packetize(accessUnit: [unit])
         measure {
             for _ in 0..<200 {
-                let depacketizer = H264Depacketizer()
+                let depacketizer = VideoDepacketizer(codec: codec)
                 for (index, payload) in payloads.enumerated() {
                     _ = depacketizer.push(payload: payload,
                                           timestamp: 900_000,
@@ -73,32 +86,29 @@ final class PacketizationThroughputTests: XCTestCase {
     func testAnnexBSplitThroughput() {
         // A synthetic access unit shaped like what x264 hands us: SPS, PPS, then one slice.
         var stream = Data()
-        stream.append(AnnexB.framed(NALUnit(bytes: Data([0x67, 0x64, 0x00, 0x28]))))
-        stream.append(AnnexB.framed(NALUnit(bytes: Data([0x68, 0xCE, 0x3C, 0x80]))))
-        stream.append(AnnexB.framed(Self.deltaNAL))
+        for unit in TestNAL.parameterSets(codec: .h264) { stream.append(AnnexB.framed(unit)) }
+        stream.append(AnnexB.framed(Self.h264Delta))
 
         measure {
-            for _ in 0..<200 {
-                _ = AnnexB.split(stream)
-            }
+            for _ in 0..<200 { _ = AnnexB.split(stream, codec: .h264) }
         }
     }
 
     /// A hard ceiling rather than a baseline: packetizing one 1080p keyframe must stay far
-    /// below a frame interval, otherwise the sender cannot keep up before shaping is even
-    /// in the picture.
+    /// below a frame interval for either codec, otherwise the sender cannot keep up before
+    /// shaping is even in the picture.
     func testKeyframePacketizationFitsWellInsideAFrameInterval() {
-        let packetizer = H264Packetizer(maxPayloadSize: 1400)
-        let iterations = 100
+        for (codec, keyframe) in [(VideoCodec.h264, Self.h264Keyframe), (.h265, Self.h265Keyframe)] {
+            let packetizer = VideoPacketizer(codec: codec, maxPayloadSize: 1400)
+            let iterations = 100
 
-        let start = MonotonicClock.now()
-        for _ in 0..<iterations {
-            _ = packetizer.packetize(accessUnit: [Self.keyframeNAL])
+            let start = MonotonicClock.now()
+            for _ in 0..<iterations { _ = packetizer.packetize(accessUnit: [keyframe]) }
+            let perCall = (MonotonicClock.now() - start) / Double(iterations)
+
+            let frameInterval60fps = 1.0 / 60.0
+            XCTAssertLessThan(perCall, frameInterval60fps / 4,
+                              "\(codec.rawValue): packetizing a 200 KB keyframe took \(perCall * 1000) ms, more than a quarter of a 60 fps frame interval")
         }
-        let perCall = (MonotonicClock.now() - start) / Double(iterations)
-
-        let frameInterval60fps = 1.0 / 60.0
-        XCTAssertLessThan(perCall, frameInterval60fps / 4,
-                          "packetizing a 200 KB keyframe took \(perCall * 1000) ms, more than a quarter of a 60 fps frame interval")
     }
 }
