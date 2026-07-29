@@ -3,7 +3,14 @@ import PackageDescription
 
 let package = Package(
     name: "IPMXPhase0",
-    platforms: [.macOS(.v14)],
+    // The real floor for the source is macOS 14 (AVSampleBufferDisplayLayer.sampleBufferRenderer,
+    // and ScreenCaptureKit before that). The 26.0 here is imposed by Homebrew's libx264, whose
+    // bottle is built with a macOS 26 deployment target: declaring anything lower makes the
+    // linker warn that we promise more compatibility than the dylib delivers, and the binary
+    // would fail to load on those systems anyway. Build x264 from source with
+    // -mmacosx-version-min=14.0 to lower this back. `.v26` is not in PackageDescription yet,
+    // hence the string form.
+    platforms: [.macOS("26.0")],
     products: [
         .executable(name: "ipmx-encoder", targets: ["ipmx-encoder"]),
         .executable(name: "ipmx-decoder", targets: ["ipmx-decoder"]),

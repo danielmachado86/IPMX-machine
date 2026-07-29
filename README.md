@@ -13,7 +13,10 @@ están en [specs/](specs/).
 
 ## Requisitos
 
-- macOS 14+ (probado en macOS 26.5, Apple Silicon)
+- macOS 26+ (probado en macOS 26.5, Apple Silicon). El código en sí solo necesita macOS 14;
+  el suelo lo impone la libx264 de Homebrew, cuya bottle se compila con deployment target 26.
+  Para bajarlo hay que compilar x264 desde fuente con `-mmacosx-version-min=14.0` y ajustar
+  `platforms:` en [Package.swift](Package.swift).
 - Swift 6. Para **compilar y ejecutar** bastan las Command Line Tools; para `swift test`
   hace falta **Xcode completo**, porque XCTest y swift-testing se distribuyen con Xcode y no
   con las CLT. Si `swift test` falla con `no such module 'XCTest'`, comprueba a dónde apunta

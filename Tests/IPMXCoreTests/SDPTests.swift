@@ -34,10 +34,20 @@ struct SDPTests {
         ("packetization-mode=1",   "RFC 6184 non-interleaved mode"),
         ("sampling=YCbCr-4:2:0",   "TR-10-15 §12 minimum sender profile"),
         ("depth=8",                "TR-10-15 §12 minimum sample depth"),
-        ("exactframerate=30",      "ST 2110-20 style frame rate signalling"),
+        ("exactframerate=",        "ST 2110-20 style frame rate signalling"),
     ])
     func requiredAttributes(fragment: String, clause: String) {
         #expect(Self.description().serialized().contains(fragment), "\(clause)")
+    }
+
+    /// The frame rate is fixture-dependent, so it is checked against the value that went in
+    /// rather than pinned in the table above — otherwise editing the fixture reds the suite
+    /// for a reason that has nothing to do with conformance.
+    @Test("exactframerate reports the configured frame rate", arguments: [24, 25, 30, 50, 60])
+    func exactFrameRate(frameRate: Int) {
+        var description = Self.description()
+        description.frameRate = frameRate
+        #expect(description.serialized().contains("exactframerate=\(frameRate);"))
     }
 
     @Test("The transport round-trips back out of the generated SDP")
