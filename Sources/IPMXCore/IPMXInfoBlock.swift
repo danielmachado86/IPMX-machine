@@ -117,6 +117,12 @@ public struct VideoMediaInfoBlock: MediaInfoBlock, Equatable, Sendable {
         )
     }
 
+    /// The `exactframerate` value as ST 2110-20 §7.2 writes it: a bare integer when the
+    /// denominator is one, otherwise the fraction.
+    public var exactFrameRate: String {
+        rateDenominator == 1 ? "\(rateNumerator)" : "\(rateNumerator)/\(rateDenominator)"
+    }
+
     public func serializedContent() -> Data {
         var out = Data()
         out.append(paddedASCII(sampling, length: 16))

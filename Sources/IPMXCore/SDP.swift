@@ -81,34 +81,35 @@ public struct SDPDescription {
     public var destinationAddress: String
     public var port: UInt16
     public var payloadType: UInt8
-    public var width: Int
-    public var height: Int
-    public var frameRate: Int
     public var maxBitrateKbps: Int
+
+    /// The video parameters, held as the very same block the RTCP Sender Report carries.
+    ///
+    /// TR-10-15 §16 requires the Media Info Block parameters to "use the same syntax as in the
+    /// 'a=fmtp' line of the associated SDP transport file", so sharing one object is the only
+    /// way to guarantee they cannot drift apart. It also stops the sampling, depth, colorimetry,
+    /// TCS and range values being written down twice.
+    public var video: VideoMediaInfoBlock
     public var formatParameters: VideoFormatParameters
     public var ttl: Int = 64
 
     public var codec: VideoCodec { formatParameters.codec }
 
-    public init(sessionName: String = "IPMX Phase 0",
+    public init(sessionName: String = "IPMX",
                 originAddress: String,
                 destinationAddress: String,
                 port: UInt16,
                 payloadType: UInt8,
-                width: Int,
-                height: Int,
-                frameRate: Int,
                 maxBitrateKbps: Int,
+                video: VideoMediaInfoBlock,
                 formatParameters: VideoFormatParameters) {
         self.sessionName = sessionName
         self.originAddress = originAddress
         self.destinationAddress = destinationAddress
         self.port = port
         self.payloadType = payloadType
-        self.width = width
-        self.height = height
-        self.frameRate = frameRate
         self.maxBitrateKbps = maxBitrateKbps
+        self.video = video
         self.formatParameters = formatParameters
     }
 
@@ -127,9 +128,12 @@ public struct SDPDescription {
         m=video \(port) RTP/AVP \(payloadType)
         b=AS:\(maxBitrateKbps)
         a=rtpmap:\(payloadType) \(codec.rtpEncodingName)/90000
-        a=fmtp:\(payloadType) width=\(width); height=\(height); exactframerate=\(frameRate); \
-        sampling=YCbCr-4:2:0; depth=8; colorimetry=BT709; TCS=SDR; RANGE=NARROW; \
-        TP=2110TPW; MAXUDP=1460; \(formatParameters.fmtpFragment)
+        a=fmtp:\(payloadType) width=\(video.width); height=\(video.height); \
+        exactframerate=\(video.exactFrameRate); sampling=\(video.sampling); \
+        depth=\(video.bitDepth); colorimetry=\(video.colorimetry); \
+        TCS=\(video.transferCharacteristics); RANGE=\(video.range); \
+        TP=2110TPW; MAXUDP=1460; measuredpixclk=\(video.measuredPixelClock); \
+        vtotal=\(video.vtotal); htotal=\(video.htotal); IPMX; \(formatParameters.fmtpFragment)
         a=ts-refclk:localmac
         a=mediaclk:direct=0
         a=mid:VID

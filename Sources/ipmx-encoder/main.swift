@@ -165,15 +165,15 @@ func writeSDPIfReady() {
     defer { counters.lock.unlock() }
     guard !counters.sdpWritten, let formatParameters = encoder.formatParameters else { return }
 
+    // The same block the Sender Reports carry, so the fmtp line and the Media Info Block
+    // cannot disagree — which is what TR-10-15 §16 requires.
     let description = SDPDescription(
         originAddress: interface,
         destinationAddress: destination,
         port: port,
         payloadType: sender.payloadType,
-        width: width,
-        height: height,
-        frameRate: frameRate,
         maxBitrateKbps: bitrateKbps,
+        video: videoInfoBlock,
         formatParameters: formatParameters
     )
 

@@ -22,6 +22,10 @@ struct SDPTests {
         spropPPS: TestNAL.h265(type: 34).bytes.base64EncodedString()
     ))
 
+    static let video = VideoMediaInfoBlock.nonBaseband(
+        sampling: "YCbCr-4:2:0", bitDepth: 8, colorimetry: "BT709",
+        width: 1920, height: 1080, frameRate: 60)
+
     private static func description(_ parameters: VideoFormatParameters,
                                     destination: String = "239.10.10.10") -> SDPDescription {
         SDPDescription(
@@ -29,10 +33,8 @@ struct SDPTests {
             destinationAddress: destination,
             port: 50000,
             payloadType: 96,
-            width: 1920,
-            height: 1080,
-            frameRate: 60,
             maxBitrateKbps: 8000,
+            video: video,
             formatParameters: parameters
         )
     }
@@ -111,8 +113,47 @@ struct SDPTests {
     @Test("exactframerate reports the configured frame rate", arguments: [24, 25, 30, 50, 60])
     func exactFrameRate(frameRate: Int) {
         var description = Self.description(Self.h264Parameters)
-        description.frameRate = frameRate
+        description.video.rateNumerator = UInt32(frameRate)
         #expect(description.serialized().contains("exactframerate=\(frameRate);"))
+    }
+
+    /// ST 2110-20 §7.2 writes a fractional rate as a quotient. Nothing in the project produces
+    /// one yet, but the SDP has to be able to say it.
+    @Test("A fractional frame rate is written as a quotient")
+    func fractionalFrameRate() {
+        var description = Self.description(Self.h264Parameters)
+        description.video.rateNumerator = 60000
+        description.video.rateDenominator = 1001
+        #expect(description.serialized().contains("exactframerate=60000/1001;"))
+    }
+
+    /// TR-10-1 §10.2 requires a sender to publish these in the fmtp clause, and TR-10-9 §10
+    /// supplies the values for a sender that cannot measure blanking. The example fmtp in
+    /// TR-10-15 carries all four; ours did not until this was fixed.
+    @Test("The fmtp line carries the raster parameters and the IPMX token", arguments: [
+        "measuredpixclk=124416000", "vtotal=1080", "htotal=1920", "IPMX;",
+    ])
+    func rasterParameters(fragment: String) {
+        #expect(Self.description(Self.h264Parameters).serialized().contains(fragment))
+    }
+
+    /// The whole reason the SDP holds a VideoMediaInfoBlock rather than its own copies.
+    @Test("The fmtp line and the Media Info Block cannot disagree (TR-10-15 §16)")
+    func fmtpAgreesWithMediaInfoBlock() {
+        let description = Self.description(Self.h264Parameters)
+        let text = description.serialized()
+        let block = description.video
+
+        #expect(text.contains("sampling=\(block.sampling);"))
+        #expect(text.contains("depth=\(block.bitDepth);"))
+        #expect(text.contains("colorimetry=\(block.colorimetry);"))
+        #expect(text.contains("TCS=\(block.transferCharacteristics);"))
+        #expect(text.contains("RANGE=\(block.range);"))
+        #expect(text.contains("width=\(block.width);"))
+        #expect(text.contains("height=\(block.height);"))
+        #expect(text.contains("measuredpixclk=\(block.measuredPixelClock);"))
+        #expect(text.contains("htotal=\(block.htotal);"))
+        #expect(text.contains("vtotal=\(block.vtotal);"))
     }
 
     @Test("A multicast destination gets a TTL suffix, a unicast one does not")
