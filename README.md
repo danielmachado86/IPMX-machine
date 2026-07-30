@@ -6,8 +6,8 @@ VideoToolbox → ventana.
 **H.264 y H.265 conviven**: `--codec h264|h265` en ambos binarios. IPMX exige los dos, y poder
 hacer A/B entre ellos es lo que hace falta para la Fase 1.
 
-Fases 0 a 2 hechas: bucle cerrado, bitstream conforme y **RTCP Sender Reports con el IPMX
-Info Block**. Sin NMOS y sin PTP todavía.
+Fases 0 a 3 hechas: bucle cerrado, bitstream conforme, **RTCP Sender Reports con el IPMX
+Info Block** y traffic shaping CINST/CMAX. Sin NMOS y sin PTP todavía.
 
 El plan completo y la justificación normativa están en
 [IPMX-macOS-encoder-decoder.md](IPMX-macOS-encoder-decoder.md). Los PDF de VSF fijados
@@ -134,6 +134,72 @@ Sin `--iface`, ambos eligen la primera interfaz IPv4 no-loopback activa. En un M
 más un adaptador Thunderbolt querrás fijarla a mano. El switch necesita IGMP snooping **con
 querier**; sin querier el tráfico se inunda o desaparece a los pocos minutos.
 
+## Traffic shaping CINST/CMAX
+
+El encoder activa por defecto el modelo de compatibilidad de red de TR-10-7 §10. Los
+datagramas RTP entran en una cola fija y un hilo dedicado con
+`THREAD_TIME_CONSTRAINT_POLICY` los libera mediante un token bucket:
+
+- capacidad = `CMAX = MAX(16, INT(MaxRate/21600))`
+- recarga = `MaxRate` paquetes por segundo
+- los primeros CMAX paquetes pueden salir como una ráfaga; después se espacian a MaxRate
+- esperas largas con `mach_wait_until`, últimos 50 µs con busy-wait
+
+Por defecto MaxRate se estima conservadoramente desde `--bitrate` y `--mtu`, suponiendo como
+mínimo un 75 % de ocupación media y reservando además cuatro paquetes auxiliares por frame
+para NAL parciales, parameter sets y SEI. Para una prueba de conformidad hay que sustituir esa
+estimación por el máximo medido:
+
+```bash
+swift run ipmx-encoder --bitrate 8000 --max-packet-rate 1200
+```
+
+`--no-shaping` conserva el envío en ráfaga para depuración, pero deja el stream fuera de
+TR-10-7 §10. El Sender Report usa los contadores que ya salieron a la red, no los que siguen
+esperando en la cola.
+
+### Qué pasa si MaxRate se queda corto
+
+La admisión es **no bloqueante y por access unit completo**. Si la cola no tiene sitio para el
+frame entero, se descarta entero y se cuenta; nunca se emite un frame a medias ni se consumen
+números de secuencia de paquetes que no van a salir.
+
+Esto es deliberado y es la parte que más importa: el productor es el hilo de la cadencia, que es
+también quien emite los Sender Reports. Bloquearlo pararía la cadencia de RTCP que TR-10-15 §15
+exige constante — y lo haría en silencio. Perder un frame bajo sobrecarga se recupera; perder la
+cadencia de reports, no.
+
+Las estadísticas periódicas muestran la señal útil:
+
+```
+1200 frames, 1200 reports, 8186 queued, 9222.3 ms in queue, 563 dropped AU
+```
+
+**`ms in queue`** es el indicador de sobrecarga: crece sin límite cuando MaxRate está por debajo
+de lo que produce el encoder. Y el log dice la causa y el remedio en cuanto se descarta el primer
+access unit.
+
+### Validación con captura externa
+
+La captura debe hacerse en otro equipo conectado a un puerto SPAN/TAP; medir en el mismo Mac
+no valida el jitter de salida de su NIC. En el observador Linux:
+
+```bash
+sudo tcpdump -i enp1s0 -s 0 -B 8192 -w ipmx-phase3.pcap \
+  'udp dst port 50000'
+python3 scripts/validate-traffic-shape.py ipmx-phase3.pcap \
+  --port 50000 --max-packet-rate 1200
+```
+
+El script es un segundo validador independiente del scheduler Swift: lee el PCAP clásico,
+reconstruye el token bucket y devuelve código 1 ante una infracción. Para la aceptación formal,
+abrir el mismo PCAP en **EBU LIST** y ejecutar el análisis ST 2110-21 Network Compatibility
+Model con el CMAX que imprime el encoder. EBU LIST sigue siendo la autoridad de laboratorio;
+el script permite automatizar la regresión local. La página pública actual de
+[EBU LIST](https://tech.ebu.ch/list) declara ST 2110-21 y ST 2110-22 con JPEG XS, pero no
+enumera H.264/H.265; si la versión instalada no clasifica el payload comprimido, conservar el
+resultado del validador y contrastar con EBU qué perfil/plugin usar para la aceptación.
+
 ## Verificar
 
 ```bash
@@ -142,7 +208,7 @@ swift test
 
 El target usa **los dos frameworks a la vez**, con un reparto deliberado:
 
-- **swift-testing** (`import Testing`) para todo el comportamiento: 125 tests en 19 suites.
+- **swift-testing** (`import Testing`) para todo el comportamiento: 130 tests en 20 suites.
   Los casos parametrizados con `@Test(arguments:)` son la razón principal — casi todo se
   ejecuta **contra los dos códecs** a partir de la misma tabla (`arguments: VideoCodec.allCases`),
   igual que los atributos que exigen las TR y los tamaños de NAL alrededor del umbral de
@@ -187,6 +253,7 @@ Sources/
     MediaClockRelationship.swift  direct=0 contra sender, TR-10-1 §10.5
     Bitstream.swift         lector/escritor de bits, Exp-Golomb, escapado de RBSP
     HEVCVideoParameterSet.swift  lee y reescribe el vps_timing_info que x265 no emite
+    TrafficShaper.swift    token bucket CINST/CMAX e hilo Mach real-time
     IPMXInfoBlock.swift     bloque 0x5831 y los Media Info Blocks 0x0005 / 0x0009 / 0x000A
     RTCPSenderReport.swift  Sender Report con el timestamp truncado de PTP, y su parser
     RTCPStreamSender.swift  emisión en media+1 y el contador de block version
@@ -219,6 +286,7 @@ scripts/
   net-tuning.sh             sysctl de buffers UDP
   run-local-loop.sh
   inspect-bitstream.py      valida el bitstream contra TR-10-15, ambos códecs
+  validate-traffic-shape.py valida un PCAP externo contra MaxRate/CMAX
   rtcp-monitor.py           decodifica Sender Reports en vivo, y escribe pcap
   ipmx-rtcp.lua             disector de Wireshark para el Info Block
 sdp/                        generado por el encoder
@@ -250,6 +318,9 @@ Ya alineado con las TR, porque cambiarlo después sale caro:
   pero equivocado
 - VUI con colorimetría BT.709 y rango limitado, coherente con el `RANGE=NARROW` del SDP
 - SDP con `TP=2110TPW`, `ts-refclk:localmac`, `mediaclk:direct=0`, `b=AS:`
+- **Traffic shaping CINST/CMAX** con token bucket, cola acotada e hilo Mach real-time. Si el
+  sistema rechaza `THREAD_TIME_CONSTRAINT_POLICY`, el encoder lo declara como best-effort en
+  vez de afirmar conformidad silenciosamente
 - **RTCP Sender Report por frame** en el puerto de media más uno (TR-10-1 §8.7), con el IPMX
   Info Block `0x5831` y los Media Info Blocks `0x0005` (vídeo) más `0x000A`/`0x0009` (códec).
   El campo llamado *NTP timestamp* lleva el formato truncado de PTP —segundos y **nanosegundos**,
@@ -277,7 +348,6 @@ Deliberadamente fuera de esta fase:
 
 | Falta | Fase | Nota |
 |---|---|---|
-| Traffic shaping CINST/CMAX | 3 | Necesita hilo real-time; macOS no tiene `SO_TXTIME` |
 | NMOS IS-04 / IS-05 / IS-11 | 4 | `sony/nmos-cpp` cubre IS-04 e IS-05; IS-11 es propio |
 | PTP | — | Innecesario mientras se opere en `ts-refclk:localmac` |
 | Buffer de recepción y reordenado | 4 | Ahora se asume entrega en orden en una LAN tranquila |

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 0 smoke test: encoder and decoder on one Mac over loopback.
+# Local smoke test: encoder and decoder on one Mac over loopback, including Phase 3 shaping.
 # No switch, no multicast, no PTP. Ctrl-C stops both.
 #
 #   ./scripts/run-local-loop.sh            # H.264

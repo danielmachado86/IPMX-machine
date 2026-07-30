@@ -320,8 +320,10 @@ Validar volcando y parseando el SPS.
 Sender Report por frame en media+1, con el Info Block `0x5831` y los Media Info Blocks
 `0x0005` + `0x000A`/`0x0009`. `encoder_delay` constante. Disector Lua en paralelo.
 
-**Fase 3 — Traffic shaper (2 semanas).**
-Hilo real-time, `CMAX = MAX(16, INT(MaxRate/21600))`. Validar con captura externa + EBU LIST.
+**Fase 3 — Traffic shaper (implementada).**
+Hilo Mach real-time, token bucket con `CMAX = MAX(16, INT(MaxRate/21600))`, métrica de
+lateness y validador PCAP independiente. La aceptación de laboratorio sigue requiriendo una
+captura externa con timestamps de hardware y contraste con EBU LIST.
 
 **Fase 4 — NMOS (3–4 semanas).**
 Integrar nmos-cpp, exponer Node/Device/Source/Flow/Sender/Receiver, SDP en

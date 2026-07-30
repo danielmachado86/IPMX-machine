@@ -4,9 +4,9 @@ import Dispatch
 import Foundation
 import IPMXCore
 
-// ipmx-encoder — Phases 0 to 2
+// ipmx-encoder — Phases 0 to 3
 // ScreenCaptureKit -> x264/x265 -> RFC 6184/7798 -> UDP, with RTCP Sender Reports carrying
-// the IPMX Info Block on the media port plus one. No NMOS, no PTP.
+// the IPMX Info Block and CINST/CMAX traffic shaping. No NMOS, no PTP.
 
 let options = CommandLineOptions()
 
@@ -33,8 +33,11 @@ if options.flag("help") {
       --sdp <path>         where to write the SDP     (default sdp/stream.sdp)
       --dump <path>        also write the Annex B elementary stream
       --mtu <bytes>        max RTP payload            (default 1400)
+      --max-packet-rate <pps>
+                           TR-10-7 MaxRate; default derives conservatively from bitrate and MTU
       --no-hrd             drop the HRD signalling and its SEI. Non-conformant, debugging only
       --no-rtcp            do not send Sender Reports. Non-conformant, debugging only
+      --no-shaping         send each frame as a burst. Non-conformant, debugging only
       --verbose
     """)
     exit(0)
@@ -89,13 +92,38 @@ guard let ticksPerFrame = MediaClock.ticksPerFrame(frameRate: frameRate) else {
 }
 
 let bitrateKbps = options.int("bitrate", default: 8000)
+guard bitrateKbps > 0 else {
+    Log.error("bitrate must be positive")
+    exit(1)
+}
 let gopSeconds = min(options.int("gop", default: 2), 5)   // TR-10-15 §11: RAP at least every 5 s
 let destination = options.string("dest", default: "239.10.10.10")
 let port = options.uint16("port", default: 50000)
 let interface = options.optionalString("iface") ?? IPv4.defaultInterfaceAddress()
 let sdpPath = options.string("sdp", default: "sdp/stream.sdp")
 let mtu = options.int("mtu", default: 1400)
+guard mtu > 4 else {
+    Log.error("mtu must leave room for the fragmentation headers")
+    exit(1)
+}
 let rtcpEnabled = !options.flag("no-rtcp")
+let shapingEnabled = !options.flag("no-shaping")
+
+let estimatedMaxPacketRate = TrafficShapeParameters.estimatedMaxPacketRate(
+    maxBitrateKbps: bitrateKbps,
+    maxRTPPayloadBytes: mtu,
+    frameRate: frameRate
+)
+let maxPacketRate = Double(options.int("max-packet-rate",
+                                       default: Int(estimatedMaxPacketRate)))
+guard maxPacketRate > 0 else {
+    Log.error("max-packet-rate must be positive")
+    exit(1)
+}
+let trafficShapeParameters = TrafficShapeParameters(maxPacketRate: maxPacketRate)
+let trafficShapeConfiguration = shapingEnabled
+    ? TrafficShaperConfiguration(parameters: trafficShapeParameters)
+    : nil
 
 do {
     for advisory in try MediaPort.validate(port) {
@@ -141,7 +169,18 @@ do {
 
     let mediaSocket = try UDPSender(host: destination, port: port, interface: interface)
     sender = RTPStreamSender(socket: mediaSocket,
-                             packetizer: VideoPacketizer(codec: codec, maxPayloadSize: mtu))
+                             packetizer: VideoPacketizer(codec: codec, maxPayloadSize: mtu),
+                             trafficShape: trafficShapeConfiguration)
+
+    if let shape = sender.trafficShapeSnapshot {
+        Log.info("traffic shaping: MaxRate \(Int(maxPacketRate)) packets/s, "
+               + "CMAX \(trafficShapeParameters.cmax), \(shape.state)")
+        if case .bestEffort = shape.state {
+            Log.info("warning: the traffic shaper could not obtain Mach real-time scheduling")
+        }
+    } else {
+        Log.info("warning: traffic shaping disabled, so this stream does not conform to TR-10-7 §10")
+    }
 
     if rtcpEnabled {
         // TR-10-1 §8.7: same destination address, UDP port plus one.
@@ -263,8 +302,8 @@ let cadence = FrameCadence(mode: sourceKind.cadenceMode, frameRate: frameRate) {
         do {
             try reporter.send(rtpTimestamp: rtpTimestamp,
                               timestamp: PTPTimestamp.now(),
-                              packetCount: UInt32(truncatingIfNeeded: sender.packetsSent),
-                              octetCount: UInt32(truncatingIfNeeded: sender.payloadBytesSent),
+                              packetCount: UInt32(truncatingIfNeeded: sender.packetsTransmitted),
+                              octetCount: UInt32(truncatingIfNeeded: sender.payloadBytesTransmitted),
                               mediaInfoBlocks: blocks)
         } catch {
             Log.error("sender report failed: \(error)")
@@ -292,10 +331,18 @@ let cadence = FrameCadence(mode: sourceKind.cadenceMode, frameRate: frameRate) {
 
         if total % UInt64(frameRate) == 0 {
             let elapsed = MonotonicClock.now() - clockOrigin
-            let mbps = Double(sender.bytesSent) * 8.0 / elapsed / 1_000_000.0
-            Log.info(String(format: "%llu frames (%llu repeated), %llu packets, %llu reports, %.2f Mbit/s",
-                            total, cadence.repeatedFrames, sender.packetsSent,
-                            reporter?.reportsSent ?? 0, mbps))
+            let shape = sender.trafficShapeSnapshot
+            let wireBytes = shape?.bytesSent ?? sender.bytesSent
+            let mbps = Double(wireBytes) * 8.0 / elapsed / 1_000_000.0
+            let queue = shape?.queuedPackets ?? 0
+            // Queue residency is the overload signal: it grows without bound when MaxRate is
+            // below what the encoder produces. Dropped access units are the consequence.
+            let residencyMs = Double(shape?.meanQueueResidencyNanoseconds ?? 0) / 1_000_000.0
+            Log.info(String(format: "%llu frames (%llu repeated), %llu packets, %llu reports, "
+                          + "%d queued, %.1f ms in queue, %llu dropped AU, %.2f Mbit/s",
+                            total, cadence.repeatedFrames, sender.packetsTransmitted,
+                            reporter?.reportsSent ?? 0, queue, residencyMs,
+                            sender.droppedAccessUnits, mbps))
         }
     } catch {
         Log.error("\(error)")
@@ -332,6 +379,10 @@ interrupt.setEventHandler {
     cadence.stop()
     Task {
         await source.stop()
+        let drained = sender.shutdown(drain: true)
+        if !drained {
+            Log.error("traffic shaper did not drain within 5 seconds")
+        }
         exit(0)
     }
 }
@@ -344,6 +395,7 @@ Task {
         cadence.start()
     } catch {
         Log.error("capture failed to start: \(error)")
+        _ = sender.shutdown(drain: false)
         if sourceKind == .screen {
             Log.error("check System Settings > Privacy & Security > Screen Recording for your terminal app")
         }
