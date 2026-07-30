@@ -1,12 +1,12 @@
-# IPMX Phase 0 — bucle RTP puro
+# IPMX — bucle RTP con RTCP e IPMX Info Block
 
 ScreenCaptureKit → x264/x265 → RFC 6184/7798 → UDP multicast → VideoToolbox → ventana.
 
 **H.264 y H.265 conviven**: `--codec h264|h265` en ambos binarios. IPMX exige los dos, y poder
 hacer A/B entre ellos es lo que hace falta para la Fase 1.
 
-Sin RTCP, sin NMOS, sin PTP. El objetivo de esta fase es **ver imagen**: cerrar el bucle
-extremo a extremo para tener sobre qué construir la conformidad de las fases siguientes.
+Fases 0 a 2 hechas: bucle cerrado, bitstream conforme y **RTCP Sender Reports con el IPMX
+Info Block**. Sin NMOS y sin PTP todavía.
 
 El plan completo y la justificación normativa están en
 [IPMX-macOS-encoder-decoder.md](IPMX-macOS-encoder-decoder.md). Los PDF de VSF fijados
@@ -86,7 +86,7 @@ swift test
 
 El target usa **los dos frameworks a la vez**, con un reparto deliberado:
 
-- **swift-testing** (`import Testing`) para todo el comportamiento: 89 tests en 15 suites.
+- **swift-testing** (`import Testing`) para todo el comportamiento: 116 tests en 18 suites.
   Los casos parametrizados con `@Test(arguments:)` son la razón principal — casi todo se
   ejecuta **contra los dos códecs** a partir de la misma tabla (`arguments: VideoCodec.allCases`),
   igual que los atributos que exigen las TR y los tamaños de NAL alrededor del umbral de
@@ -130,6 +130,9 @@ Sources/
     MediaPort.swift         reglas de puerto de TR-10-7 §7, shall contra should
     Bitstream.swift         lector/escritor de bits, Exp-Golomb, escapado de RBSP
     HEVCVideoParameterSet.swift  lee y reescribe el vps_timing_info que x265 no emite
+    IPMXInfoBlock.swift     bloque 0x5831 y los Media Info Blocks 0x0005 / 0x0009 / 0x000A
+    RTCPSenderReport.swift  Sender Report con el timestamp truncado de PTP, y su parser
+    RTCPStreamSender.swift  emisión en media+1 y el contador de block version
     CommandLineOptions.swift
   ipmx-encoder/
     main.swift
@@ -138,6 +141,7 @@ Sources/
     X264Encoder.swift         libx264, NV12 directo
     X265Encoder.swift         libx265, requiere I420 planar
     ChromaDeinterleaver.swift NV12 -> I420 con vImage, solo para x265
+    FrameCadence.swift        temporizador que desacopla captura de codificación
   ipmx-decoder/
     main.swift
     VideoToolboxDecoder.swift H.264 y HEVC
@@ -148,10 +152,14 @@ Tests/IPMXCoreTests/
   RTPHeaderTests.swift      swift-testing: cabecera RTP y reloj de 90 kHz
   SDPTests.swift            swift-testing: SDP por códec, RBSP, direccionamiento, flags
   BitstreamTests.swift      swift-testing: bits, Exp-Golomb, RBSP, reescritura del VPS
+  RTCPTests.swift           swift-testing: Info Block, Media Info Blocks, Sender Report
   ThroughputTests.swift     XCTest: medidas de rendimiento, ambos códecs
 scripts/
   net-tuning.sh             sysctl de buffers UDP
   run-local-loop.sh
+  inspect-bitstream.py      valida el bitstream contra TR-10-15, ambos códecs
+  rtcp-monitor.py           decodifica Sender Reports en vivo, y escribe pcap
+  ipmx-rtcp.lua             disector de Wireshark para el Info Block
 sdp/                        generado por el encoder
 ```
 
@@ -181,6 +189,17 @@ Ya alineado con las TR, porque cambiarlo después sale caro:
   pero equivocado
 - VUI con colorimetría BT.709 y rango limitado, coherente con el `RANGE=NARROW` del SDP
 - SDP con `TP=2110TPW`, `ts-refclk:localmac`, `mediaclk:direct=0`, `b=AS:`
+- **RTCP Sender Report por frame** en el puerto de media más uno (TR-10-1 §8.7), con el IPMX
+  Info Block `0x5831` y los Media Info Blocks `0x0005` (vídeo) más `0x000A`/`0x0009` (códec).
+  El campo llamado *NTP timestamp* lleva el formato truncado de PTP —segundos y **nanosegundos**,
+  no una fracción de 2³²— que es donde una implementación que siga RFC 3550 al pie de la letra
+  se equivoca en silencio
+- **Cadencia constante** aunque la pantalla esté quieta (TR-10-15 §15). La captura deposita en
+  un hueco y un temporizador tira de él, así que un escritorio inmóvil reencoda el último buffer
+  en vez de parar el stream. Sin esto no se puede cumplir «si el encoder salta un frame, no
+  puede saltarse su Sender Report»
+- `htotal`, `vtotal` y `measuredpixclk` según **TR-10-9 §10**, que es la regla para un sender
+  cuya salida no viene de convertir una señal baseband: no hay blanking que medir
 - **HRD Type II activo por defecto** en H.264: `nal_hrd_parameters_present_flag = 1`,
   `cpb_cnt_minus1 = 0`, Buffering Period SEI en cada punto de acceso aleatorio y Picture Timing
   SEI en cada access unit (TR-10-15 §10). TR-10-7 §10 desactiva el Virtual Receiver Buffer Model
@@ -193,16 +212,36 @@ Deliberadamente fuera de esta fase:
 
 | Falta | Fase | Nota |
 |---|---|---|
-| RTCP Sender Reports + IPMX Info Block | 2 | Nada de esto existe en ninguna librería; hay que escribirlo entero |
 | Traffic shaping CINST/CMAX | 3 | Necesita hilo real-time; macOS no tiene `SO_TXTIME` |
 | NMOS IS-04 / IS-05 / IS-11 | 4 | `sony/nmos-cpp` cubre IS-04 e IS-05; IS-11 es propio |
 | PTP | — | Innecesario mientras se opere en `ts-refclk:localmac` |
 | Buffer de recepción y reordenado | 4 | Ahora se asume entrega en orden en una LAN tranquila |
-| Cadencia constante con pantalla estática | 2 | ScreenCaptureKit solo entrega frames cuando algo cambia, así que el stream se para en un escritorio inmóvil. TR-10-15 §15 exige cadencia fija y prohíbe saltarse el Sender Report de un frame |
-| Media Info Block 0x0009 / 0x000A | 2 | Los datos del códec para el RTCP; el SDP ya los calcula |
 | Main10 (H.265 10 bits) | — | La ruta vImage pasaría a 16 bits. Main 8 bits es el mínimo de TR-10-15 Part 2 §12 |
 
 ---
+
+## Ver el RTCP
+
+Dos herramientas, deliberadamente independientes del código Swift: si validas un serializador
+con su propio parser, un malentendido compartido pasa desapercibido.
+
+```bash
+python3 scripts/rtcp-monitor.py --group 127.0.0.1 --port 50001 --count 3
+```
+
+Decodifica los Sender Reports contra las tablas de las TR, comprueba la regla de TR-10-9 §10,
+avisa si el campo NTP no lleva nanosegundos, y mide la cadencia real. Con `--pcap fichero.pcap`
+guarda lo que recibe.
+
+Para Wireshark, [scripts/ipmx-rtcp.lua](scripts/ipmx-rtcp.lua) disecciona el Info Block entero.
+Sin él, Wireshark muestra `Sender Report (PSE:Unknown)`; con él, cada campo:
+
+```bash
+cp scripts/ipmx-rtcp.lua ~/.config/wireshark/plugins/
+tshark -r captura.pcap -X lua_script:scripts/ipmx-rtcp.lua -V
+```
+
+Se registra como heurístico de UDP, así que no hace falta «Decode As» ni fijar un puerto.
 
 ## Validar el bitstream
 
