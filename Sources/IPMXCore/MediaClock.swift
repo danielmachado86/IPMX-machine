@@ -25,6 +25,22 @@ public struct MediaClock {
         let ticks = (seconds - originSeconds) * Double(MediaClock.rate)
         return randomOffset &+ UInt32(truncatingIfNeeded: Int64(ticks.rounded()))
     }
+
+    /// Timestamp for the nth frame of a constant-cadence sender.
+    ///
+    /// Preferred over deriving from a capture timestamp once the sender runs on a fixed
+    /// schedule: the increment is exact, so successive frames are exactly one frame period
+    /// apart in the media clock, with no accumulated rounding.
+    public func timestamp(forFrameIndex index: UInt64, ticksPerFrame: UInt32) -> UInt32 {
+        randomOffset &+ UInt32(truncatingIfNeeded: index &* UInt64(ticksPerFrame))
+    }
+
+    /// The exact number of 90 kHz ticks in one frame period, when there is one.
+    /// Every integer rate this project supports divides 90000 evenly.
+    public static func ticksPerFrame(frameRate: Int) -> UInt32? {
+        guard frameRate > 0, rate % UInt32(frameRate) == 0 else { return nil }
+        return rate / UInt32(frameRate)
+    }
 }
 
 /// Monotonic wall clock that does not jump when the system time is adjusted.
