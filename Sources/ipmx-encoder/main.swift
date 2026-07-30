@@ -60,11 +60,13 @@ let interface = options.optionalString("iface") ?? IPv4.defaultInterfaceAddress(
 let sdpPath = options.string("sdp", default: "sdp/stream.sdp")
 let mtu = options.int("mtu", default: 1400)
 
-if port % 2 != 0 {
-    Log.info("warning: TR-10-7 §7 requires an even UDP destination port; \(port) is odd")
-}
-if port <= 5000 {
-    Log.info("warning: TR-10-7 §7 recommends a UDP destination port above 5000")
+do {
+    for advisory in try MediaPort.validate(port) {
+        Log.info("warning: \(advisory)")
+    }
+} catch {
+    Log.error("\(error)")
+    exit(1)
 }
 
 // MARK: - Pipeline

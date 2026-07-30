@@ -49,6 +49,17 @@ if let sdpPath = options.optionalString("sdp"),
     Log.info("loaded transport from \(sdpPath): \(codec.rawValue) on \(group):\(port)")
 }
 
+// Same TR-10-7 §7 rule as the sender: a receiver that binds an odd port would have its RTCP
+// socket land on an even one and clash with another stream's media in Phase 2.
+do {
+    for advisory in try MediaPort.validate(port) {
+        Log.info("warning: \(advisory)")
+    }
+} catch {
+    Log.error("\(error)")
+    exit(1)
+}
+
 let interface = options.optionalString("iface") ?? IPv4.defaultInterfaceAddress()
 
 let application = NSApplication.shared
