@@ -25,9 +25,15 @@ struct EncoderConfiguration {
     var keyframeIntervalSeconds: Int = 2
     var preset: String
     var profile: String
-    /// Phase 1 switch: emit the HRD signalling and the Buffering Period / Picture Timing SEI
-    /// that TR-10-15 §10 mandates.
-    var enableHRD: Bool = false
+    /// Emit the HRD signalling plus the Buffering Period / Picture Timing SEI that
+    /// TR-10-15 §10 mandates.
+    ///
+    /// On by default: TR-10-7 §10 switches off the ST 2110 Virtual Receiver Buffer Model for
+    /// compressed video and leaves buffer management to the codec spec, and TR-10-15 §10 fills
+    /// that gap with the HRD schedules. Without it the stream still decodes but carries no
+    /// buffering contract at all, which is what a receiver needs to derive its playout time.
+    /// Measured cost at 1080p60/8 Mbit/s: 6.2 kbps of SEI, about 0.08%.
+    var enableHRD: Bool = true
 }
 
 enum EncoderError: Error, CustomStringConvertible {

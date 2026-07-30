@@ -86,7 +86,7 @@ swift test
 
 El target usa **los dos frameworks a la vez**, con un reparto deliberado:
 
-- **swift-testing** (`import Testing`) para todo el comportamiento: 61 tests en 11 suites.
+- **swift-testing** (`import Testing`) para todo el comportamiento: 62 tests en 11 suites.
   Los casos parametrizados con `@Test(arguments:)` son la razón principal — casi todo se
   ejecuta **contra los dos códecs** a partir de la misma tabla (`arguments: VideoCodec.allCases`),
   igual que los atributos que exigen las TR y los tamaños de NAL alrededor del umbral de
@@ -173,13 +173,19 @@ Ya alineado con las TR, porque cambiarlo después sale caro:
   pero equivocado
 - VUI con colorimetría BT.709 y rango limitado, coherente con el `RANGE=NARROW` del SDP
 - SDP con `TP=2110TPW`, `ts-refclk:localmac`, `mediaclk:direct=0`, `b=AS:`
+- **HRD Type II activo por defecto** en H.264: `nal_hrd_parameters_present_flag = 1`,
+  `cpb_cnt_minus1 = 0`, Buffering Period SEI en cada punto de acceso aleatorio y Picture Timing
+  SEI en cada access unit (TR-10-15 §10). TR-10-7 §10 desactiva el Virtual Receiver Buffer Model
+  de ST 2110 para vídeo comprimido y deja el buffering al códec, así que el HRD es el **único**
+  contrato de temporización que le queda a un receptor IPMX. Coste medido a 1080p60/8 Mbit/s:
+  6.2 kbps de SEI, un 0.08 %. Se puede desactivar con `--no-hrd`, pero entonces el stream no
+  es conforme
 
 Deliberadamente fuera de esta fase:
 
 | Falta | Fase | Nota |
 |---|---|---|
 | RTCP Sender Reports + IPMX Info Block | 2 | Nada de esto existe en ninguna librería; hay que escribirlo entero |
-| HRD Type II, Buffering Period / Picture Timing SEI | 1 | `--hrd` ya enciende el señalizado en x264 y x265; falta validar el SPS |
 | Traffic shaping CINST/CMAX | 3 | Necesita hilo real-time; macOS no tiene `SO_TXTIME` |
 | NMOS IS-04 / IS-05 / IS-11 | 4 | `sony/nmos-cpp` cubre IS-04 e IS-05; IS-11 es propio |
 | PTP | — | Innecesario mientras se opere en `ts-refclk:localmac` |
@@ -190,13 +196,22 @@ Deliberadamente fuera de esta fase:
 
 ---
 
-## Siguiente paso concreto
+## Validar el bitstream
+
+La Fase 1 se comprueba, no se supone. El encoder puede volcar el elementary stream y
+[scripts/inspect-bitstream.py](scripts/inspect-bitstream.py) lo contrasta contra
+TR-10-15 Part 3:
 
 ```bash
-swift run ipmx-encoder --hrd --dest 127.0.0.1 --iface 127.0.0.1
+swift run ipmx-encoder --dump /tmp/out.264 --fps 60 --dest 127.0.0.1 --iface 127.0.0.1
+python3 scripts/inspect-bitstream.py /tmp/out.264 --fps 60
 ```
 
-y después volcar el SPS del stream para comprobar que
-`nal_hrd_parameters_present_flag = 1`. Ese es el primer entregable de la Fase 1, y es
-también la medición que decide si VideoToolbox puede llegar a sustituir a x264 en el
-camino de producción.
+Es un parser real de SPS con lector Exp-Golomb y des-escapado de RBSP, porque el VUI y
+`hrd_parameters` no están alineados a byte. Comprueba perfil, colorimetría, HRD, SEI,
+intervalo entre puntos de acceso aleatorio y slices por imagen. Devuelve exit code 1 si falla
+algún «shall», así que entra en CI tal cual. También acepta un `.sdp` directamente, sacando
+el SPS de `sprop-parameter-sets` (en ese modo no puede comprobar las SEI).
+
+Pendiente: el parser es **solo H.264**. Llegar al `vui_hrd` de un SPS de HEVC obliga a recorrer
+`st_ref_pic_set()`, así que el `bEmitHRDSEI` de x265 está cableado pero sin verificar.

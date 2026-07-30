@@ -27,8 +27,10 @@ if options.flag("help") {
       --profile <name>     h264: high | main          (default high, per TR-10-15 Part 3 §12)
                            h265: main                 (default main, per TR-10-15 Part 2 §12)
       --sdp <path>         where to write the SDP     (default sdp/stream.sdp)
+      --dump <path>        also write the Annex B elementary stream, for scripts/inspect-bitstream.py
       --mtu <bytes>        max RTP payload            (default 1400)
-      --hrd                enable HRD signalling      (Phase 1 preview)
+      --no-hrd             drop the HRD signalling and the Buffering Period / Picture Timing
+                           SEI. Non-conformant per TR-10-15 §10 — debugging only
       --verbose
     """)
     exit(0)
@@ -79,8 +81,15 @@ do {
         keyframeIntervalSeconds: gopSeconds,
         preset: options.string("preset", default: "veryfast"),
         profile: options.string("profile", default: codec == .h264 ? "high" : "main"),
-        enableHRD: options.flag("hrd")
+        enableHRD: !options.flag("no-hrd")
     )
+
+    if options.flag("hrd") {
+        Log.info("note: HRD signalling is on by default now; --hrd is redundant")
+    }
+    if options.flag("no-hrd") {
+        Log.info("warning: HRD signalling disabled, so this stream does not conform to TR-10-15 §10")
+    }
 
     switch codec {
     case .h264: encoder = try X264Encoder(configuration: configuration)
@@ -95,6 +104,15 @@ do {
 } catch {
     Log.error("\(error)")
     exit(1)
+}
+
+// Optional Annex B dump, so the bitstream can be checked against TR-10-15 §8 and §10 with
+// scripts/inspect-bitstream.py. Writing it costs a file handle and nothing else.
+let bitstreamDump: FileHandle? = options.optionalString("dump").flatMap { path in
+    FileManager.default.createFile(atPath: path, contents: nil)
+    let handle = FileHandle(forWritingAtPath: path)
+    if handle != nil { Log.info("dumping the elementary stream to \(path)") }
+    return handle
 }
 
 let clockOrigin = MonotonicClock.now()
@@ -147,6 +165,10 @@ let source = ScreenSource(
         let units = try encoder.encode(pixelBuffer: pixelBuffer,
                                        presentationTimestamp: Int64(rtpTimestamp))
         guard !units.isEmpty else { return }
+
+        if let bitstreamDump {
+            for unit in units { bitstreamDump.write(AnnexB.framed(unit)) }
+        }
 
         // TR-10-7 §9: every packet of a progressive frame carries the same RTP timestamp.
         try sender.send(accessUnit: units, timestamp: rtpTimestamp)

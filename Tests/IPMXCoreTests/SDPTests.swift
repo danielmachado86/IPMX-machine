@@ -290,16 +290,26 @@ struct CommandLineOptionsTests {
     @Test("Values, flags and defaults are distinguished")
     func parsing() {
         let options = CommandLineOptions(["--codec", "h265", "--dest", "239.1.1.1",
-                                          "--port", "50000", "--verbose", "--hrd"])
+                                          "--port", "50000", "--verbose", "--no-hrd"])
 
         #expect(options.string("codec", default: "h264") == "h265")
         #expect(options.string("dest", default: "x") == "239.1.1.1")
         #expect(options.uint16("port", default: 1) == 50000)
         #expect(options.flag("verbose"))
-        #expect(options.flag("hrd"))
+        #expect(options.flag("no-hrd"))
         #expect(!options.flag("missing"))
         #expect(options.int("fps", default: 60) == 60, "an absent key falls back to the default")
         #expect(options.optionalString("nope") == nil)
+    }
+
+    /// HRD is on unless opted out, so the encoder derives it by negation. Getting this
+    /// backwards would silently ship non-conformant streams.
+    @Test("A hyphenated negative flag is parsed as a flag, not as a value")
+    func negativeFlag() {
+        #expect(CommandLineOptions(["--no-hrd"]).flag("no-hrd"))
+        #expect(CommandLineOptions(["--no-hrd", "--dest", "127.0.0.1"]).flag("no-hrd"))
+        #expect(!CommandLineOptions(["--dest", "127.0.0.1"]).flag("no-hrd"))
+        #expect(CommandLineOptions(["--no-hrd"]).optionalString("no-hrd") == nil)
     }
 
     @Test("A trailing flag with no value is not swallowed by the next argument")
