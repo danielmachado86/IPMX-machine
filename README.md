@@ -86,7 +86,7 @@ swift test
 
 El target usa **los dos frameworks a la vez**, con un reparto deliberado:
 
-- **swift-testing** (`import Testing`) para todo el comportamiento: 116 tests en 18 suites.
+- **swift-testing** (`import Testing`) para todo el comportamiento: 119 tests en 18 suites.
   Los casos parametrizados con `@Test(arguments:)` son la razón principal — casi todo se
   ejecuta **contra los dos códecs** a partir de la misma tabla (`arguments: VideoCodec.allCases`),
   igual que los atributos que exigen las TR y los tamaños de NAL alrededor del umbral de
@@ -199,7 +199,11 @@ Ya alineado con las TR, porque cambiarlo después sale caro:
   en vez de parar el stream. Sin esto no se puede cumplir «si el encoder salta un frame, no
   puede saltarse su Sender Report»
 - `htotal`, `vtotal` y `measuredpixclk` según **TR-10-9 §10**, que es la regla para un sender
-  cuya salida no viene de convertir una señal baseband: no hay blanking que medir
+  cuya salida no viene de convertir una señal baseband: no hay blanking que medir. Van tanto en
+  el `a=fmtp` del SDP (TR-10-1 §10.2) como en el Media Info Block, y **salen del mismo objeto**:
+  `SDPDescription` guarda el propio `VideoMediaInfoBlock` en vez de una copia de sus valores,
+  porque TR-10-15 §16 exige que la línea `fmtp` y el Media Info Block usen la misma sintaxis y
+  dos fuentes de verdad separadas acaban divergiendo
 - **HRD Type II activo por defecto** en H.264: `nal_hrd_parameters_present_flag = 1`,
   `cpb_cnt_minus1 = 0`, Buffering Period SEI en cada punto de acceso aleatorio y Picture Timing
   SEI en cada access unit (TR-10-15 §10). TR-10-7 §10 desactiva el Virtual Receiver Buffer Model
