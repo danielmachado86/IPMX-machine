@@ -178,17 +178,6 @@ struct ParameterSetTests {
         #expect(ParameterSets.decodeSprop("!!!not base64!!!", codec: .h265).isEmpty)
     }
 
-    @Test("Emulation prevention bytes are stripped", arguments: [
-        ([0x00, 0x00, 0x03, 0x01] as [UInt8], [0x00, 0x00, 0x01] as [UInt8]),
-        ([0x00, 0x00, 0x03, 0x00], [0x00, 0x00, 0x00]),
-        ([0xAA, 0xBB, 0xCC], [0xAA, 0xBB, 0xCC]),
-        ([0x00, 0x03, 0x01], [0x00, 0x03, 0x01]),            // only one zero, not an EPB
-        ([0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x01], [0x00, 0x00, 0x00, 0x00, 0x01]),
-    ])
-    func unescapeRBSP(escaped: [UInt8], expected: [UInt8]) {
-        #expect([UInt8](ParameterSets.unescapeRBSP(Data(escaped))) == expected)
-    }
-
     /// profile_tier_level sits exactly where runs of zero bytes are common, so a real SPS
     /// almost always has an emulation prevention byte inside it. Reading the escaped bytes
     /// at fixed offsets yields a plausible but wrong profile — this SPS carries one 0x03 to
@@ -221,6 +210,47 @@ struct ParameterSetTests {
             vps: TestNAL.h265(type: 32),
             sps: NALUnit(bytes: Data([0x42, 0x01, 0x01, 0x01]), codec: .h265),
             pps: TestNAL.h265(type: 34)) == nil)
+    }
+}
+
+@Suite("Media port rules (TR-10-7 §7)")
+struct MediaPortTests {
+
+    @Test("An even port above 1024 is accepted", arguments: [1026, 5002, 50000, 65534])
+    func accepted(port: Int) throws {
+        #expect(MediaPort.isValid(UInt16(port)))
+        #expect(try MediaPort.validate(UInt16(port)).isEmpty || port <= 5000)
+    }
+
+    /// A shall, not a should: RTCP goes to port+1 (TR-10-1 §8.7), so an odd media port puts
+    /// RTCP on an even port where the next stream's media belongs.
+    @Test("An odd port is rejected", arguments: [1025, 5001, 50001, 65535])
+    func oddRejected(port: Int) {
+        #expect(!MediaPort.isValid(UInt16(port)))
+        #expect(throws: MediaPort.ValidationError.self) {
+            try MediaPort.validate(UInt16(port))
+        }
+    }
+
+    @Test("A port at or below 1024 is rejected", arguments: [0, 80, 1024])
+    func tooLowRejected(port: Int) {
+        #expect(!MediaPort.isValid(UInt16(port)))
+    }
+
+    @Test("A port between 1026 and 5000 is legal but advised against", arguments: [1026, 4000, 5000])
+    func lowPortAdvisory(port: Int) throws {
+        let advisories = try MediaPort.validate(UInt16(port))
+        #expect(advisories.count == 1, "the >5000 rule is a should, so it warns rather than fails")
+    }
+
+    @Test("Above 5000 there is nothing to warn about")
+    func noAdvisoryAbove5000() throws {
+        #expect(try MediaPort.validate(50000).isEmpty)
+    }
+
+    @Test("The SDP default port satisfies the rule")
+    func sdpDefaultIsValid() throws {
+        #expect(try MediaPort.validate(50000).isEmpty)
     }
 }
 

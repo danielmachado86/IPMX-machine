@@ -206,32 +206,6 @@ public struct SDPDescription {
 
 public enum ParameterSets {
 
-    /// Strips emulation prevention bytes to recover the RBSP.
-    ///
-    /// Required before reading anything at a fixed offset in an H.265 SPS: the
-    /// profile_tier_level sits right where runs of zero bytes are common, so an encoder will
-    /// usually have inserted 0x03 somewhere inside it. Indexing the escaped bytes yields a
-    /// plausible but wrong profile.
-    public static func unescapeRBSP(_ data: Data) -> Data {
-        let bytes = [UInt8](data)
-        var out = [UInt8]()
-        out.reserveCapacity(bytes.count)
-
-        var index = 0
-        while index < bytes.count {
-            if index + 2 < bytes.count,
-               bytes[index] == 0x00, bytes[index + 1] == 0x00, bytes[index + 2] == 0x03 {
-                out.append(0x00)
-                out.append(0x00)
-                index += 3                       // drop the emulation prevention byte
-            } else {
-                out.append(bytes[index])
-                index += 1
-            }
-        }
-        return Data(out)
-    }
-
     /// `profile-level-id` per RFC 6184 §8.1: the three bytes following the SPS NAL header.
     ///
     /// No un-escaping needed here: an emulation prevention byte this early would require
@@ -262,9 +236,12 @@ public enum ParameterSets {
     ///   [4..7]   general_profile_compatibility_flag[0..31]
     ///   [8..13]  48 constraint flag bits
     ///   [14]     general_level_idc
-    /// Everything is byte-aligned from index 3, so no bit reader is needed.
+    /// Everything is byte-aligned from index 3, so no bit reader is needed — but the RBSP still
+    /// has to be un-escaped first: profile_tier_level sits right where runs of zero bytes are
+    /// common, so an encoder will usually have inserted a 0x03 inside it, and indexing the
+    /// escaped bytes yields a plausible but wrong profile.
     public static func hevcFormatParameters(vps: NALUnit, sps: NALUnit, pps: NALUnit) -> H265FormatParameters? {
-        let rbsp = [UInt8](unescapeRBSP(sps.bytes))
+        let rbsp = [UInt8](RBSP.unescape(sps.bytes))
         guard rbsp.count >= 15 else { return nil }
 
         let profileSpace = (rbsp[3] & 0xC0) >> 6
