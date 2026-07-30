@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreMedia
 import Dispatch
 import Foundation
@@ -13,6 +14,9 @@ if options.flag("help") {
     print("""
     ipmx-encoder — IPMX sender
 
+      --source <kind>      screen | capture           (default screen)
+      --device <sel>       capture device by index, name substring or unique id
+      --list-devices       print the capture devices and their formats, then exit
       --codec <name>       h264 | h265                (default h264)
       --dest <ip>          destination address        (default 239.10.10.10)
       --port <n>           destination UDP port, even and >5000 per TR-10-7 §7 (default 50000)
@@ -23,7 +27,7 @@ if options.flag("help") {
       --fps <n>            frame rate                 (default 60)
       --bitrate <kbps>     target bitrate             (default 8000)
       --gop <seconds>      keyframe interval, TR-10-15 §11 caps this at 5 (default 2)
-      --display <index>    display to capture         (default 0)
+      --display <index>    display to capture, screen source only (default 0)
       --preset <name>      x264/x265 preset           (default veryfast)
       --profile <name>     h264: high | main, h265: main
       --sdp <path>         where to write the SDP     (default sdp/stream.sdp)
@@ -37,6 +41,32 @@ if options.flag("help") {
 }
 
 Log.verbose = options.flag("verbose")
+
+if options.flag("list-devices") {
+    print(CaptureDeviceSource.describeDevices())
+    exit(0)
+}
+
+let sourceName = options.string("source", default: "screen")
+guard let sourceKind = VideoSourceKind(argument: sourceName) else {
+    Log.error("unknown source '\(sourceName)'; expected screen or capture")
+    exit(1)
+}
+
+// Resolved here rather than where the source is built, so a bad selector fails before the
+// encoder and the sockets are brought up.
+let captureDevice: AVCaptureDevice?
+if sourceKind == .capture {
+    let selector = options.optionalString("device")
+    guard let device = CaptureDeviceSource.device(matching: selector) else {
+        Log.error("no capture device matches '\(selector ?? "")'")
+        Log.error("available devices:\n\(CaptureDeviceSource.describeDevices())")
+        exit(1)
+    }
+    captureDevice = device
+} else {
+    captureDevice = nil
+}
 
 let codecName = options.string("codec", default: "h264")
 guard let codec = VideoCodec(argument: codecName) else {
@@ -76,9 +106,11 @@ do {
     exit(1)
 }
 
-// The clock signalling that goes in both the SDP and the IPMX Info Block, so the two agree.
+// The clock signalling, shared by the SDP and the IPMX Info Block so the two agree.
+// TR-10-1 §10.5: a capture card is Async Media at the input of a Sender, so its media clock is
+// asynchronous to our Internal Clock and must be signalled as `sender`, not `direct=0`.
 let timestampReferenceClock = "localmac"
-let mediaClockSignalling = "direct=0"
+let mediaClockSignalling = sourceKind.mediaClockRelationship.sdpValue
 
 // MARK: - Pipeline
 
@@ -142,6 +174,16 @@ let bitstreamDump: FileHandle? = options.optionalString("dump").flatMap { path i
 let clockOrigin = MonotonicClock.now()
 let mediaClock = MediaClock(originSeconds: clockOrigin)
 
+// A capture card *is* a baseband conversion, so TR-10-1 §10.2 applies and the sender is
+// supposed to report the measured pixel clock and the real total raster, within 150 ppm.
+// UVC delivers frames, not blanking intervals, so we cannot measure either. Say so out loud
+// rather than leave the gap buried in a comment: it needs a device SDK that exposes signal
+// timing, which is the main thing a DeckLink or AJA would buy over a Magewell.
+if sourceKind == .capture {
+    Log.info("warning: reporting htotal, vtotal and measuredpixclk per TR-10-9 §10, but a "
+           + "baseband source should measure them per TR-10-1 §10.2 — UVC does not expose the raster")
+}
+
 /// The video Media Info Block never changes for a given configuration, so it is built once.
 /// TR-10-9 §10 supplies the three fields a non-baseband sender cannot measure.
 let videoInfoBlock = VideoMediaInfoBlock.nonBaseband(
@@ -174,7 +216,9 @@ func writeSDPIfReady() {
         payloadType: sender.payloadType,
         maxBitrateKbps: bitrateKbps,
         video: videoInfoBlock,
-        formatParameters: formatParameters
+        formatParameters: formatParameters,
+        timestampReferenceClock: timestampReferenceClock,
+        mediaClock: mediaClockSignalling
     )
 
     let url = URL(fileURLWithPath: sdpPath)
@@ -192,8 +236,21 @@ func writeSDPIfReady() {
 // MARK: - Cadence
 
 // Everything below runs on the cadence timer, one pass per nominal frame period.
-let cadence = FrameCadence(frameRate: frameRate) { pixelBuffer, frameIndex in
-    let rtpTimestamp = mediaClock.timestamp(forFrameIndex: frameIndex, ticksPerFrame: ticksPerFrame)
+let cadence = FrameCadence(mode: sourceKind.cadenceMode, frameRate: frameRate) { tick in
+    let pixelBuffer = tick.pixelBuffer
+
+    // Screen capture runs on our own clock, so the timestamp is exact arithmetic on the frame
+    // index. A capture card does not: `mediaclk:sender` means the media clock is the sender's
+    // own and unrelated to any reference, so the timestamp has to follow when the frame really
+    // arrived, otherwise the two clocks drift apart over a long run.
+    let rtpTimestamp: UInt32
+    switch sourceKind {
+    case .screen:
+        rtpTimestamp = mediaClock.timestamp(forFrameIndex: tick.frameIndex,
+                                            ticksPerFrame: ticksPerFrame)
+    case .capture:
+        rtpTimestamp = mediaClock.timestamp(forPresentationTime: tick.presentationTime)
+    }
 
     // TR-10-15 §15: the Sender Report goes out before the first media packet of its frame, and
     // a frame the encoder skips still gets its report. Sending it here, before the encode,
@@ -245,14 +302,27 @@ let cadence = FrameCadence(frameRate: frameRate) { pixelBuffer, frameIndex in
     }
 }
 
-let source = ScreenSource(
-    configuration: .init(width: width, height: height, frameRate: frameRate,
-                         displayIndex: options.int("display", default: 0))
-) { pixelBuffer, _ in
-    // Capture only fills the slot; the cadence timer decides when to encode. See FrameCadence
-    // for why this indirection exists.
-    cadence.submit(pixelBuffer)
+// Both sources only fill the slot; FrameCadence decides what a frame is and when.
+let source: VideoSource
+switch sourceKind {
+case .screen:
+    source = ScreenSource(
+        configuration: .init(width: width, height: height, frameRate: frameRate,
+                             displayIndex: options.int("display", default: 0))
+    ) { pixelBuffer, presentationTime in
+        cadence.submit(pixelBuffer, presentationTime: CMTimeGetSeconds(presentationTime))
+    }
+
+case .capture:
+    source = CaptureDeviceSource(
+        device: captureDevice!,
+        configuration: .init(width: width, height: height, frameRate: frameRate)
+    ) { pixelBuffer, presentationTime in
+        cadence.submit(pixelBuffer, presentationTime: presentationTime)
+    }
 }
+
+Log.info("source: \(sourceKind.description)")
 
 // MARK: - Run
 
@@ -274,7 +344,9 @@ Task {
         cadence.start()
     } catch {
         Log.error("capture failed to start: \(error)")
-        Log.error("check System Settings > Privacy & Security > Screen Recording for your terminal app")
+        if sourceKind == .screen {
+            Log.error("check System Settings > Privacy & Security > Screen Recording for your terminal app")
+        }
         exit(1)
     }
 }

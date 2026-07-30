@@ -9,7 +9,7 @@ import ScreenCaptureKit
 /// Requires the Screen Recording privacy permission. When the binary is launched from a
 /// terminal, macOS attributes the permission to the terminal application, so the first run
 /// prompts once and then needs that app restarted.
-final class ScreenSource: NSObject, SCStreamOutput, SCStreamDelegate {
+final class ScreenSource: NSObject, VideoSource, SCStreamOutput, SCStreamDelegate {
     struct Configuration {
         var width: Int
         var height: Int

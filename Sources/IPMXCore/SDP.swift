@@ -91,6 +91,16 @@ public struct SDPDescription {
     /// TCS and range values being written down twice.
     public var video: VideoMediaInfoBlock
     public var formatParameters: VideoFormatParameters
+
+    /// The `a=ts-refclk` value. TR-10-1 §10.4: `localmac` when no Common Reference Clock is
+    /// present on the network.
+    public var timestampReferenceClock: String = "localmac"
+
+    /// The `a=mediaclk` value, TR-10-1 §10.5. `direct=0` when the Media Clock is derived from
+    /// the Internal Clock; `sender` when it is asynchronous to it, "for example if Async Media
+    /// is present at the input of a Sender" — which is exactly a capture card.
+    public var mediaClock: String = "direct=0"
+
     public var ttl: Int = 64
 
     public var codec: VideoCodec { formatParameters.codec }
@@ -102,7 +112,9 @@ public struct SDPDescription {
                 payloadType: UInt8,
                 maxBitrateKbps: Int,
                 video: VideoMediaInfoBlock,
-                formatParameters: VideoFormatParameters) {
+                formatParameters: VideoFormatParameters,
+                timestampReferenceClock: String = "localmac",
+                mediaClock: String = "direct=0") {
         self.sessionName = sessionName
         self.originAddress = originAddress
         self.destinationAddress = destinationAddress
@@ -111,6 +123,8 @@ public struct SDPDescription {
         self.maxBitrateKbps = maxBitrateKbps
         self.video = video
         self.formatParameters = formatParameters
+        self.timestampReferenceClock = timestampReferenceClock
+        self.mediaClock = mediaClock
     }
 
     public func serialized() -> String {
@@ -134,8 +148,8 @@ public struct SDPDescription {
         TCS=\(video.transferCharacteristics); RANGE=\(video.range); \
         TP=2110TPW; MAXUDP=1460; measuredpixclk=\(video.measuredPixelClock); \
         vtotal=\(video.vtotal); htotal=\(video.htotal); IPMX; \(formatParameters.fmtpFragment)
-        a=ts-refclk:localmac
-        a=mediaclk:direct=0
+        a=ts-refclk:\(timestampReferenceClock)
+        a=mediaclk:\(mediaClock)
         a=mid:VID
         a=sendonly
 

@@ -1,6 +1,7 @@
 # IPMX — bucle RTP con RTCP e IPMX Info Block
 
-ScreenCaptureKit → x264/x265 → RFC 6184/7798 → UDP multicast → VideoToolbox → ventana.
+Captura de pantalla o **ingesta HDMI/SDI** → x264/x265 → RFC 6184/7798 → UDP multicast →
+VideoToolbox → ventana.
 
 **H.264 y H.265 conviven**: `--codec h264|h265` en ambos binarios. IPMX exige los dos, y poder
 hacer A/B entre ellos es lo que hace falta para la Fase 1.
@@ -41,6 +42,61 @@ están en [specs/](specs/).
 ```bash
 swift build -c release
 ```
+
+## Elegir la fuente
+
+```bash
+swift run ipmx-encoder --list-devices                       # qué hay conectado y en qué formatos
+swift run ipmx-encoder --source screen                      # captura de pantalla (por defecto)
+swift run ipmx-encoder --source capture --device magewell   # ingesta HDMI/SDI
+```
+
+`--device` acepta índice, un trozo del nombre o el unique id. Sin él, se elige el primer
+dispositivo **externo**, y solo si no hay ninguno se cae a la cámara integrada.
+
+Magewell es **UVC class compliant**, así que no necesita SDK: aparece como `AVCaptureDevice`
+de tipo `.external` y toda la integración es AVFoundation estándar. Blackmagic DeckLink y AJA
+necesitan sus propios SDK en C++ y serían un archivo hermano de
+[CaptureDeviceSource.swift](Sources/ipmx-encoder/CaptureDeviceSource.swift), no un cambio en él.
+
+Requiere permiso de **Camera** (System Settings → Privacy & Security → Camera), atribuido a la
+aplicación de terminal igual que el de Screen Recording. El diálogo solo aparece si lanzas el
+binario desde un terminal interactivo.
+
+### Las dos fuentes no son intercambiables
+
+La diferencia es normativa, no de fontanería:
+
+| | `screen` | `capture` |
+|---|---|---|
+| Naturaleza | sintética | conversión de baseband |
+| `a=mediaclk` | `direct=0` | **`sender`** (TR-10-1 §10.5, Async Media) |
+| Cadencia | temporizador que **tira** del último buffer | el dispositivo **empuja**, el temporizador solo vigila |
+| Timestamp RTP | aritmética exacta sobre el índice de frame | derivado del instante real de llegada |
+| Formato de píxel | NV12 nativo, cero conversión | 4:2:2 habitual → NV12 con `VTPixelTransferSession` |
+
+Lo de la cadencia importa: con una capturadora, el reloj de la tarjeta es la autoridad. Un
+temporizador local haría que dos relojes libres derivaran y acabarías repitiendo o tirando un
+frame periódicamente sin motivo. Por eso el temporizador se degrada a vigilante y solo actúa si
+la señal desaparece — que es lo que mantiene viva la cadencia de Sender Reports que exige
+TR-10-15 §15.
+
+Verificado en vivo contra un `AVCaptureDevice` a 1080p30: el Info Block dice `mediaclk=sender`,
+`measuredpixclk` sale 62208000 = 1920×1080×30, y el delta de RTP entre Sender Reports es
+3001/2999/3001 ticks en vez de los 3000 nominales — sigue el reloj del dispositivo, que es lo
+que `sender` declara, frente a los +1500 exactos e invariables de la fuente de pantalla.
+
+Sin verificar todavía: la conversión 4:2:2 → 4:2:0. Los dispositivos probados entregan NV12
+nativo y la negociación toma el camino de cero conversiones, así que
+[PixelFormatConverter.swift](Sources/ipmx-encoder/PixelFormatConverter.swift) solo se ejercitará
+con una capturadora que presente UYVY o v210.
+
+**No conformidad conocida con `--source capture`**: una capturadora es conversión de baseband,
+así que TR-10-1 §10.2 exige reportar el pixel clock **medido** y el raster total real, con
+150 ppm de tolerancia. UVC entrega frames, no intervalos de blanking, así que seguimos usando
+los valores de TR-10-9 §10. El encoder lo avisa al arrancar. Cerrarlo requiere un SDK de
+dispositivo que exponga la temporización de señal — que es lo principal que compra un DeckLink
+o un AJA frente a una Magewell.
 
 ## Probar sin red
 
@@ -86,7 +142,7 @@ swift test
 
 El target usa **los dos frameworks a la vez**, con un reparto deliberado:
 
-- **swift-testing** (`import Testing`) para todo el comportamiento: 119 tests en 18 suites.
+- **swift-testing** (`import Testing`) para todo el comportamiento: 125 tests en 19 suites.
   Los casos parametrizados con `@Test(arguments:)` son la razón principal — casi todo se
   ejecuta **contra los dos códecs** a partir de la misma tabla (`arguments: VideoCodec.allCases`),
   igual que los atributos que exigen las TR y los tamaños de NAL alrededor del umbral de
@@ -128,6 +184,7 @@ Sources/
     MediaClock.swift        reloj de 90 kHz de marcha libre (ts-refclk:localmac)
     SDP.swift               fmtp por códec, profile_tier_level, des-escapado de RBSP
     MediaPort.swift         reglas de puerto de TR-10-7 §7, shall contra should
+    MediaClockRelationship.swift  direct=0 contra sender, TR-10-1 §10.5
     Bitstream.swift         lector/escritor de bits, Exp-Golomb, escapado de RBSP
     HEVCVideoParameterSet.swift  lee y reescribe el vps_timing_info que x265 no emite
     IPMXInfoBlock.swift     bloque 0x5831 y los Media Info Blocks 0x0005 / 0x0009 / 0x000A
@@ -141,7 +198,10 @@ Sources/
     X264Encoder.swift         libx264, NV12 directo
     X265Encoder.swift         libx265, requiere I420 planar
     ChromaDeinterleaver.swift NV12 -> I420 con vImage, solo para x265
-    FrameCadence.swift        temporizador que desacopla captura de codificación
+    FrameCadence.swift        cadencia: modo tirar (pantalla) o empujar (capturadora)
+    VideoSource.swift         la fuente y lo que su naturaleza implica normativamente
+    CaptureDeviceSource.swift ingesta HDMI/SDI por AVFoundation, sin SDK
+    PixelFormatConverter.swift 4:2:2 -> 4:2:0 con VTPixelTransferSession
   ipmx-decoder/
     main.swift
     VideoToolboxDecoder.swift H.264 y HEVC
@@ -153,6 +213,7 @@ Tests/IPMXCoreTests/
   SDPTests.swift            swift-testing: SDP por códec, RBSP, direccionamiento, flags
   BitstreamTests.swift      swift-testing: bits, Exp-Golomb, RBSP, reescritura del VPS
   RTCPTests.swift           swift-testing: Info Block, Media Info Blocks, Sender Report
+  MediaClockTests.swift     swift-testing: direct=0 contra sender, en SDP y en RTCP
   ThroughputTests.swift     XCTest: medidas de rendimiento, ambos códecs
 scripts/
   net-tuning.sh             sysctl de buffers UDP
