@@ -86,7 +86,7 @@ swift test
 
 El target usa **los dos frameworks a la vez**, con un reparto deliberado:
 
-- **swift-testing** (`import Testing`) para todo el comportamiento: 62 tests en 11 suites.
+- **swift-testing** (`import Testing`) para todo el comportamiento: 89 tests en 15 suites.
   Los casos parametrizados con `@Test(arguments:)` son la razón principal — casi todo se
   ejecuta **contra los dos códecs** a partir de la misma tabla (`arguments: VideoCodec.allCases`),
   igual que los atributos que exigen las TR y los tamaños de NAL alrededor del umbral de
@@ -127,6 +127,9 @@ Sources/
     UDPSocket.swift         emisión/recepción UDP, membresía multicast, selección de interfaz
     MediaClock.swift        reloj de 90 kHz de marcha libre (ts-refclk:localmac)
     SDP.swift               fmtp por códec, profile_tier_level, des-escapado de RBSP
+    MediaPort.swift         reglas de puerto de TR-10-7 §7, shall contra should
+    Bitstream.swift         lector/escritor de bits, Exp-Golomb, escapado de RBSP
+    HEVCVideoParameterSet.swift  lee y reescribe el vps_timing_info que x265 no emite
     CommandLineOptions.swift
   ipmx-encoder/
     main.swift
@@ -144,6 +147,7 @@ Tests/IPMXCoreTests/
   PacketizationTests.swift  swift-testing: cabeceras NAL, Annex B, FU, round trip, pérdidas
   RTPHeaderTests.swift      swift-testing: cabecera RTP y reloj de 90 kHz
   SDPTests.swift            swift-testing: SDP por códec, RBSP, direccionamiento, flags
+  BitstreamTests.swift      swift-testing: bits, Exp-Golomb, RBSP, reescritura del VPS
   ThroughputTests.swift     XCTest: medidas de rendimiento, ambos códecs
 scripts/
   net-tuning.sh             sysctl de buffers UDP
@@ -159,7 +163,11 @@ Ya alineado con las TR, porque cambiarlo después sale caro:
 
 - Reloj RTP de **90 kHz** y timestamp compartido por todos los paquetes de un frame (TR-10-7 §9)
 - **Un solo VCL NAL por paquete UDP** (TR-10-15 §9) — nunca se agrega con STAP-A
-- Puerto UDP **par y > 5000**, con aviso si lo cambias (TR-10-7 §7)
+- Puerto UDP **par y > 1024 forzado** en ambos binarios: TR-10-7 §7 lo dice como *shall*, así
+  que un puerto impar aborta con error en vez de avisar. Importa por una razón concreta: RTCP va
+  al puerto inmediatamente superior (TR-10-1 §8.7), así que un puerto de media impar pondría el
+  RTCP en un par y colisionaría con la media del siguiente stream. El > 5000 es un *should* y
+  solo avisa
 - Random access point cada ≤ 5 s, con el flag limitado a ese máximo (TR-10-15 §11)
 - **Decode order = output order**, sin B-frames (TR-10-15 §10)
 - Perfil **High** (H.264) forzado de verdad: los presets rápidos de x264 apagan CABAC y el
@@ -207,11 +215,31 @@ swift run ipmx-encoder --dump /tmp/out.264 --fps 60 --dest 127.0.0.1 --iface 127
 python3 scripts/inspect-bitstream.py /tmp/out.264 --fps 60
 ```
 
-Es un parser real de SPS con lector Exp-Golomb y des-escapado de RBSP, porque el VUI y
-`hrd_parameters` no están alineados a byte. Comprueba perfil, colorimetría, HRD, SEI,
-intervalo entre puntos de acceso aleatorio y slices por imagen. Devuelve exit code 1 si falla
-algún «shall», así que entra en CI tal cual. También acepta un `.sdp` directamente, sacando
-el SPS de `sprop-parameter-sets` (en ese modo no puede comprobar las SEI).
+Cubre **los dos códecs** y detecta cuál es por la extensión, por el `rtpmap` del SDP o por la
+estructura de los NAL. Es un parser real con lector Exp-Golomb y des-escapado de RBSP, porque
+el VUI y el `hrd_parameters` no están alineados a byte — y en H.265 el VUI está **detrás de
+`st_ref_pic_set()`**, que hay que recorrer entero aunque no se compruebe nada de él.
 
-Pendiente: el parser es **solo H.264**. Llegar al `vui_hrd` de un SPS de HEVC obliga a recorrer
-`st_ref_pic_set()`, así que el `bEmitHRDSEI` de x265 está cableado pero sin verificar.
+Comprueba perfil, colorimetría, HRD, SEI, intervalo entre puntos de acceso aleatorio y slices
+por imagen. Devuelve exit code 1 si falla algún «shall», así que entra en CI tal cual. También
+acepta un `.sdp` directamente (en ese modo no puede comprobar SEI ni acceso aleatorio).
+
+Estado actual: **los dos códecs pasan entero.**
+
+### El VPS de H.265 se reescribe
+
+TR-10-15 Part 2 §10 exige `vps_timing_info_present_flag = 1` con `vps_num_units_in_tick` y
+`vps_time_scale` puestos, y **x265 no tiene ninguna API pública de VPS timing** — solo los
+equivalentes de VUI. Así que [HEVCVideoParameterSet.swift](Sources/IPMXCore/HEVCVideoParameterSet.swift)
+parchea el VPS a la salida del encoder, antes de paquetizarlo.
+
+No se puede hacer con un splice de bytes: los campos caen a 66 bits del final de una sintaxis
+no alineada, detrás de `profile_tier_level` y de los bucles de capas, así que hay que
+reconstruir el RBSP entero con el bit writer de [Bitstream.swift](Sources/IPMXCore/Bitstream.swift)
+y volver a insertar los emulation prevention bytes. El VPS pasa de 24 a 34 bytes, una vez por
+punto de acceso aleatorio.
+
+Se aplica a **todos** los VPS, no solo al primero: `bRepeatHeaders` pone uno delante de cada
+IRAP, y la copia parcheada es la que llega tanto al stream RTP como al `sprop-vps` del SDP.
+Si el `vps_extension_flag` estuviera puesto, el parcheo se abstiene en vez de arriesgarse a
+corromper el VPS. Verificado que VideoToolbox acepta el VPS reescrito sin perder un frame.
