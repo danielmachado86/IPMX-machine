@@ -15,6 +15,9 @@ public final class RTPStreamSender {
 
     public private(set) var packetsSent: UInt64 = 0
     public private(set) var bytesSent: UInt64 = 0
+    /// Payload octets only, excluding RTP headers and padding — what the RTCP Sender Report's
+    /// "sender's octet count" is defined to hold (RFC 3550 §6.4.1).
+    public private(set) var payloadBytesSent: UInt64 = 0
 
     public init(socket: UDPSender,
                 packetizer: VideoPacketizer,
@@ -47,6 +50,7 @@ public final class RTPStreamSender {
             sequenceNumber = sequenceNumber &+ 1
             packetsSent += 1
             bytesSent += UInt64(datagram.count)
+            payloadBytesSent += UInt64(payload.count)
         }
     }
 }
