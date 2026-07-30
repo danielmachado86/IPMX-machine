@@ -121,6 +121,12 @@ guard maxPacketRate > 0 else {
     exit(1)
 }
 let trafficShapeParameters = TrafficShapeParameters(maxPacketRate: maxPacketRate)
+
+// TR-10-7 §11: b=AS covers the whole IP packet, so the coded bitrate alone understates it.
+// Derived from the same MaxRate the shaper paces to, so the SDP and the traffic shape describe
+// one stream rather than two.
+let advertisedBitrateKbps = trafficShapeParameters.advertisedBitrateKbps(
+    codedBitrateKbps: bitrateKbps)
 let trafficShapeConfiguration = shapingEnabled
     ? TrafficShaperConfiguration(parameters: trafficShapeParameters)
     : nil
@@ -175,6 +181,8 @@ do {
     if let shape = sender.trafficShapeSnapshot {
         Log.info("traffic shaping: MaxRate \(Int(maxPacketRate)) packets/s, "
                + "CMAX \(trafficShapeParameters.cmax), \(shape.state)")
+        Log.debug("b=AS:\(advertisedBitrateKbps) = \(bitrateKbps) coded + "
+                + "IP/UDP/RTP headers at MaxRate")
         if case .bestEffort = shape.state {
             Log.info("warning: the traffic shaper could not obtain Mach real-time scheduling")
         }
@@ -253,7 +261,7 @@ func writeSDPIfReady() {
         destinationAddress: destination,
         port: port,
         payloadType: sender.payloadType,
-        maxBitrateKbps: bitrateKbps,
+        maxBitrateKbps: advertisedBitrateKbps,
         video: videoInfoBlock,
         formatParameters: formatParameters,
         timestampReferenceClock: timestampReferenceClock,

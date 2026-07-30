@@ -14,6 +14,16 @@ Examples:
 For formal lab acceptance, open the same PCAP in EBU LIST and run its ST 2110-21 Network
 Compatibility Model analysis. This script provides the fast independent check used during
 development; it is not a replacement for EBU LIST.
+
+Alcance de lo que esto prueba, y lo que no:
+
+Este script reimplementa el MISMO token bucket que el emisor. Por tanto valida que el emisor
+respeta el bucket que se le configuró, no que cumple ST 2110-21. El algoritmo normativo de
+CINST vive en ST 2110-21, que es un estándar SMPTE de pago y no está en specs/. Si el modelo
+que ambos comparten fuera incorrecto, los dos coincidirían igualmente.
+
+Es una diferencia deliberada respecto a scripts/rtcp-monitor.py, que sí se escribió desde las
+tablas de las TR y por eso sirve como comprobación independiente.
 """
 
 import argparse

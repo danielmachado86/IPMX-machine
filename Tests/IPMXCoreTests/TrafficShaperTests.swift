@@ -236,3 +236,65 @@ struct TrafficShaperObservabilityTests {
         #expect(shaper.snapshot().maximumPacingErrorNanoseconds < 10_000_000)
     }
 }
+
+@Suite("Advertised bitrate (TR-10-7 §11)")
+struct AdvertisedBitrateTests {
+
+    /// "The bit rate shall include the whole of each IP packet, i.e. IP headers and payload."
+    /// The coded bitrate alone leaves out 40 bytes per packet, which at these packet rates is
+    /// not a rounding error.
+    @Test("b=AS adds the IP, UDP and RTP headers at MaxRate")
+    func headersAreIncluded() {
+        let parameters = TrafficShapeParameters(maxPacketRate: 1_193)
+        let advertised = parameters.advertisedBitrateKbps(codedBitrateKbps: 8_000)
+
+        // 1193 pps x 40 bytes x 8 = 381.8 kbit/s of headers.
+        #expect(advertised == 8_382)
+        #expect(advertised > 8_000, "never below the coded rate")
+    }
+
+    @Test("The header allowance scales with the packet rate", arguments: [
+        (600.0, 8_192), (1_193.0, 8_382), (2_400.0, 8_768),
+    ])
+    func scalesWithPacketRate(packetRate: Double, expected: Int) {
+        #expect(TrafficShapeParameters(maxPacketRate: packetRate)
+            .advertisedBitrateKbps(codedBitrateKbps: 8_000) == expected)
+    }
+
+    @Test("The header size matches IPv4 plus UDP plus the fixed RTP header")
+    func headerSize() {
+        #expect(TrafficShapeParameters.ipUDPRTPHeaderBytes == 40)
+        #expect(TrafficShapeParameters.ipUDPRTPHeaderBytes == 20 + 8 + RTPHeader.size)
+    }
+
+    @Test("A zero header allowance reduces to the coded rate")
+    func noHeaders() {
+        #expect(TrafficShapeParameters(maxPacketRate: 1_000)
+            .advertisedBitrateKbps(codedBitrateKbps: 8_000, headerBytesPerPacket: 0) == 8_000)
+    }
+}
+
+@Suite("Traffic shaper shutdown")
+struct TrafficShaperShutdownTests {
+
+    /// Completion used to be signalled through a one-shot semaphore, so a second caller waited
+    /// out its whole timeout and then reported failure on a shaper that had stopped cleanly.
+    @Test("stop is idempotent and does not stall a second caller", .timeLimit(.minutes(1)))
+    func repeatedStop() {
+        let shaper = TrafficShaper(
+            configuration: TrafficShaperConfiguration(
+                parameters: TrafficShapeParameters(maxPacketRate: 100_000),
+                queueCapacity: 16
+            )
+        ) { _ in }
+
+        #expect(shaper.enqueue(Data([1]), payloadOctets: 1))
+        #expect(shaper.stop(drain: true, timeout: 5))
+
+        let start = Date()
+        #expect(shaper.stop(drain: true, timeout: 5), "a second stop still reports success")
+        #expect(shaper.stop(drain: false, timeout: 5))
+        #expect(Date().timeIntervalSince(start) < 1.0, "and returns immediately")
+        #expect(shaper.snapshot().state == .stopped)
+    }
+}

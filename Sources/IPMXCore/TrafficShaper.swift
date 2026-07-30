@@ -41,6 +41,26 @@ public struct TrafficShapeParameters: Sendable, Equatable {
         let perFrameAllowance = Double(frameRate * auxiliaryPacketsPerFrame)
         return packetsForCodedBytes + perFrameAllowance
     }
+
+    /// IPv4 + UDP + the fixed RTP header, which is what packetizing adds to every packet.
+    public static let ipUDPRTPHeaderBytes = 20 + 8 + 12
+
+    /// The value TR-10-7 §11 wants in `b=AS`.
+    ///
+    /// > The `<brvalue>` shall be the maximum target bit rate of the encoded media stream...
+    /// > The bit rate shall include the whole of each IP packet, i.e. IP headers and payload.
+    ///
+    /// So the coded bitrate alone understates it: at MaxRate packets per second the IP, UDP and
+    /// RTP headers are themselves a real part of what the network has to carry. Deriving the
+    /// advertised rate from the same MaxRate the shaper paces to keeps the SDP and the traffic
+    /// shape describing one stream rather than two.
+    public func advertisedBitrateKbps(codedBitrateKbps: Int,
+                                      headerBytesPerPacket: Int = ipUDPRTPHeaderBytes) -> Int {
+        precondition(codedBitrateKbps > 0)
+        precondition(headerBytesPerPacket >= 0)
+        let headerBitsPerSecond = maxPacketRate * Double(headerBytesPerPacket) * 8.0
+        return codedBitrateKbps + Int(ceil(headerBitsPerSecond / 1_000.0))
+    }
 }
 
 /// Configuration for the asynchronous macOS traffic-shaping worker.
@@ -191,7 +211,7 @@ public final class TrafficShaper: @unchecked Sendable {
 
     private let sendOperation: SendOperation
     private let started = DispatchSemaphore(value: 0)
-    private let finished = DispatchSemaphore(value: 0)
+    private var workerFinished = false
     private var worker: Thread?
 
     public convenience init(socket: UDPSender, configuration: TrafficShaperConfiguration) {
@@ -261,9 +281,15 @@ public final class TrafficShaper: @unchecked Sendable {
     }
 
     /// Stops accepting new packets. With `drain`, all queued packets are paced before exit.
+    ///
+    /// Idempotent, and safe to call from more than one thread: completion is observed through
+    /// the condition variable rather than a one-shot semaphore, which a second caller would
+    /// have waited on until its timeout expired.
     @discardableResult
     public func stop(drain: Bool, timeout: TimeInterval = 5) -> Bool {
         condition.lock()
+        defer { condition.unlock() }
+
         if accepting {
             accepting = false
             drainWhenStopping = drain
@@ -275,9 +301,12 @@ public final class TrafficShaper: @unchecked Sendable {
             }
             condition.broadcast()
         }
-        condition.unlock()
 
-        return finished.wait(timeout: .now() + timeout) == .success
+        let deadline = Date().addingTimeInterval(timeout)
+        while !workerFinished {
+            guard condition.wait(until: deadline) else { return false }
+        }
+        return true
     }
 
     public func snapshot() -> TrafficShaperSnapshot {
@@ -343,8 +372,9 @@ public final class TrafficShaper: @unchecked Sendable {
 
             condition.lock()
             state = .stopped
+            workerFinished = true
+            condition.broadcast()
             condition.unlock()
-            finished.signal()
         }
     }
 
@@ -395,10 +425,15 @@ public final class TrafficShaper: @unchecked Sendable {
             preemptible: 1
         )
 
+        // mach_thread_self() hands back a send right that the caller owns. Without the
+        // deallocate the reference leaks for the lifetime of the process.
+        let thread = mach_thread_self()
+        defer { mach_port_deallocate(mach_task_self_, thread) }
+
         return withUnsafeMutablePointer(to: &policy) { pointer in
             pointer.withMemoryRebound(to: integer_t.self,
                                       capacity: policyCount) {
-                thread_policy_set(mach_thread_self(),
+                thread_policy_set(thread,
                                   thread_policy_flavor_t(THREAD_TIME_CONSTRAINT_POLICY),
                                   $0,
                                   mach_msg_type_number_t(policyCount))

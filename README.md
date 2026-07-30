@@ -317,7 +317,10 @@ Ya alineado con las TR, porque cambiarlo después sale caro:
   los encoders insertan emulation prevention bytes, e indexar en crudo da un perfil plausible
   pero equivocado
 - VUI con colorimetría BT.709 y rango limitado, coherente con el `RANGE=NARROW` del SDP
-- SDP con `TP=2110TPW`, `ts-refclk:localmac`, `mediaclk:direct=0`, `b=AS:`
+- SDP con `TP=2110TPW`, `ts-refclk:localmac`, `mediaclk` según la fuente, y **`b=AS` derivado
+  del MaxRate del shaper**: TR-10-7 §11 exige que incluya el paquete IP completo, así que al
+  bitrate codificado se le suman las cabeceras IP/UDP/RTP a MaxRate. Con 8000 kbps y 1193 pps
+  salen 8382, no 8000
 - **Traffic shaping CINST/CMAX** con token bucket, cola acotada e hilo Mach real-time. Si el
   sistema rechaza `THREAD_TIME_CONSTRAINT_POLICY`, el encoder lo declara como best-effort en
   vez de afirmar conformidad silenciosamente
