@@ -20,6 +20,7 @@ final class X265Encoder: VideoEncoder {
     private var vps: NALUnit?
     private var sps: NALUnit?
     private var pps: NALUnit?
+    private var loggedVPSPatch = false
 
     var formatParameters: VideoFormatParameters? {
         guard let vps, let sps, let pps,
@@ -80,7 +81,16 @@ final class X265Encoder: VideoEncoder {
 
         if configuration.enableHRD {
             parameters.pointee.bEmitHRDSEI = 1
+            // Set explicitly rather than trusting the defaults, the same way the H.264 path
+            // forces CABAC: a preset that flipped either of these would silently drop the
+            // timing and HRD signalling TR-10-15 Part 2 §8 and §10 require.
+            parameters.pointee.bEmitVUITimingInfo = 1
+            parameters.pointee.bEmitVUIHRDInfo = 1
         }
+
+        // TR-10-15 Part 2 §10 also requires vps_timing_info_present_flag = 1, and x265 has no
+        // public API for VPS timing at all — only the VUI equivalents above. The VPS is patched
+        // on the way out instead, see patchVPSTiming.
 
         guard x265_param_apply_profile(parameters, configuration.profile) == 0 else {
             x265_param_free(parameters)
@@ -138,7 +148,7 @@ final class X265Encoder: VideoEncoder {
             guard let payload = nal.payload, nal.sizeBytes > 0 else { continue }
             // payload includes the Annex B start code; split() strips it.
             let framed = Data(bytes: payload, count: Int(nal.sizeBytes))
-            units.append(contentsOf: AnnexB.split(framed, codec: .h265))
+            units.append(contentsOf: AnnexB.split(framed, codec: .h265).map(patchVPSTiming))
         }
 
         if Log.verbose {
@@ -147,6 +157,39 @@ final class X265Encoder: VideoEncoder {
 
         captureParameterSets(from: units)
         return units
+    }
+
+    /// Inserts the VPS timing info TR-10-15 Part 2 §10 requires and x265 cannot emit.
+    ///
+    /// Applied to every VPS on the way out, not just the first: `bRepeatHeaders` puts one in
+    /// front of every IRAP, and the patched copy is what reaches both the RTP stream and the
+    /// SDP's `sprop-vps`. Anything other than a VPS passes straight through.
+    private func patchVPSTiming(_ unit: NALUnit) -> NALUnit {
+        guard unit.typeValue == H265NALType.vps.rawValue else { return unit }
+
+        switch HEVCVideoParameterSet.ensuringTimingInfo(
+            unit,
+            numUnitsInTick: 1,
+            timeScale: UInt32(configuration.frameRate)
+        ) {
+        case .rewritten(let patched):
+            if !loggedVPSPatch {
+                loggedVPSPatch = true
+                Log.info("patched the VPS to carry vps_timing_info (TR-10-15 Part 2 §10): "
+                       + "\(unit.bytes.count) -> \(patched.bytes.count) bytes")
+            }
+            return patched
+
+        case .alreadyPresent:
+            return unit                                 // a future x265 may learn to do this
+
+        case .unsupported(let reason):
+            if !loggedVPSPatch {
+                loggedVPSPatch = true
+                Log.error("could not add vps_timing_info, stream is not conformant: \(reason)")
+            }
+            return unit
+        }
     }
 
     private func captureParameterSets(from units: [NALUnit]) {
