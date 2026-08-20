@@ -19,20 +19,37 @@ public final class RTPStreamSender {
     /// "sender's octet count" is defined to hold (RFC 3550 §6.4.1).
     public private(set) var payloadBytesSent: UInt64 = 0
 
-    public init(socket: UDPSender,
-                packetizer: VideoPacketizer,
-                trafficShape: TrafficShaperConfiguration? = nil,
-                payloadType: UInt8 = 96,
-                ssrc: UInt32 = UInt32.random(in: 1...UInt32.max)) {
+    public convenience init(socket: UDPSender,
+                            packetizer: VideoPacketizer,
+                            trafficShape: TrafficShaperConfiguration? = nil,
+                            payloadType: UInt8 = 96,
+                            ssrc: UInt32 = UInt32.random(in: 1...UInt32.max)) {
+        self.init(socket: socket,
+                  packetizer: packetizer,
+                  trafficShaper: trafficShape.map { TrafficShaper(socket: socket, configuration: $0) },
+                  payloadType: payloadType,
+                  ssrc: ssrc,
+                  initialSequenceNumber: UInt16.random(in: 0...UInt16.max))
+    }
+
+    /// Injectable form. Exists so the admission and sequence-number behaviour can be tested
+    /// against a shaper whose drain is controlled, and from a known starting sequence.
+    init(socket: UDPSender,
+         packetizer: VideoPacketizer,
+         trafficShaper: TrafficShaper?,
+         payloadType: UInt8 = 96,
+         ssrc: UInt32 = UInt32.random(in: 1...UInt32.max),
+         initialSequenceNumber: UInt16 = UInt16.random(in: 0...UInt16.max)) {
         self.socket = socket
         self.packetizer = packetizer
-        self.trafficShaper = trafficShape.map {
-            TrafficShaper(socket: socket, configuration: $0)
-        }
+        self.trafficShaper = trafficShaper
         self.payloadType = payloadType
         self.ssrc = ssrc
-        self.sequenceNumber = UInt16.random(in: 0...UInt16.max)
+        self.sequenceNumber = initialSequenceNumber
     }
+
+    /// The next sequence number that will go on the wire. Only meaningful for tests.
+    var nextSequenceNumber: UInt16 { sequenceNumber }
 
     /// Access units the shaper had no room for. A frame lost under overload is recoverable;
     /// stalling the producer would stop the RTCP Sender Report cadence, which is not.

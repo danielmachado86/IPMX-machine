@@ -54,6 +54,12 @@ public struct TrafficShapeParameters: Sendable, Equatable {
     /// RTP headers are themselves a real part of what the network has to carry. Deriving the
     /// advertised rate from the same MaxRate the shaper paces to keeps the SDP and the traffic
     /// shape describing one stream rather than two.
+    ///
+    /// Not counted: the 2 bytes of FU-A headers (3 for H.265) that fragmentation adds inside
+    /// the RTP payload, which the coded bitrate does not include either. Measured on a real
+    /// 1080p60 stream that is 1.5 kbit/s against a b=AS of 8382 — 0.018%, so it is left out
+    /// rather than estimated from a fragmentation ratio the sender does not know in advance.
+    /// Ethernet framing is excluded by TR-10-7 §11 itself: "shall not include layers below IP".
     public func advertisedBitrateKbps(codedBitrateKbps: Int,
                                       headerBytesPerPacket: Int = ipUDPRTPHeaderBytes) -> Int {
         precondition(codedBitrateKbps > 0)
@@ -155,6 +161,10 @@ public struct TrafficShaperSnapshot: Sendable {
     public let maximumQueueResidencyNanoseconds: UInt64
     public let totalQueueResidencyNanoseconds: UInt64
 
+    /// Longest a single `sendto` took. A socket that starts blocking shows up here before it
+    /// shows up anywhere else, and it is invisible to the pacing error by construction.
+    public let maximumSendDurationNanoseconds: UInt64
+
     public let lastSendError: String?
 
     public var meanQueueResidencyNanoseconds: UInt64 {
@@ -207,6 +217,7 @@ public final class TrafficShaper: @unchecked Sendable {
     private var maximumPacingErrorNanoseconds: UInt64 = 0
     private var maximumQueueResidencyNanoseconds: UInt64 = 0
     private var totalQueueResidencyNanoseconds: UInt64 = 0
+    private var maximumSendDurationNanoseconds: UInt64 = 0
     private var lastSendError: String?
 
     private let sendOperation: SendOperation
@@ -323,6 +334,7 @@ public final class TrafficShaper: @unchecked Sendable {
             maximumPacingErrorNanoseconds: maximumPacingErrorNanoseconds,
             maximumQueueResidencyNanoseconds: maximumQueueResidencyNanoseconds,
             totalQueueResidencyNanoseconds: totalQueueResidencyNanoseconds,
+            maximumSendDurationNanoseconds: maximumSendDurationNanoseconds,
             lastSendError: lastSendError
         )
     }
@@ -346,14 +358,23 @@ public final class TrafficShaper: @unchecked Sendable {
                 let reserved = pacer.reserve(nowNanoseconds: MachMonotonicClock.nowNanoseconds())
                 wait(untilNanoseconds: reserved)
 
-                let actual = MachMonotonicClock.nowNanoseconds()
-                let pacingError = actual > reserved ? actual - reserved : 0
-                let residency = actual > datagram.enqueuedAtNanoseconds
-                    ? actual - datagram.enqueuedAtNanoseconds
-                    : 0
+                // Taken before the send on purpose: this is scheduler accuracy, "did the thread
+                // wake when it said it would". Folding the socket call into it would conflate
+                // two unrelated failures.
+                let woke = MachMonotonicClock.nowNanoseconds()
+                let pacingError = woke > reserved ? woke - reserved : 0
 
                 do {
                     try sendOperation(datagram.bytes)
+
+                    // Residency and send duration are taken after, because a blocking sendto is
+                    // real time the packet spent inside us and has to show up somewhere.
+                    let completed = MachMonotonicClock.nowNanoseconds()
+                    let residency = completed > datagram.enqueuedAtNanoseconds
+                        ? completed - datagram.enqueuedAtNanoseconds
+                        : 0
+                    let sendDuration = completed > woke ? completed - woke : 0
+
                     condition.lock()
                     packetsSent += 1
                     bytesSent += UInt64(datagram.bytes.count)
@@ -361,6 +382,7 @@ public final class TrafficShaper: @unchecked Sendable {
                     maximumPacingErrorNanoseconds = max(maximumPacingErrorNanoseconds, pacingError)
                     maximumQueueResidencyNanoseconds = max(maximumQueueResidencyNanoseconds, residency)
                     totalQueueResidencyNanoseconds &+= residency
+                    maximumSendDurationNanoseconds = max(maximumSendDurationNanoseconds, sendDuration)
                     condition.unlock()
                 } catch {
                     condition.lock()

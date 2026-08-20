@@ -116,7 +116,8 @@ struct TrafficShaperAdmissionTests {
 
     /// A shaper whose worker parks inside the very first send, so once `parked` is signalled
     /// the queue cannot change underneath an assertion.
-    private static func parkedShaper(capacity: Int) -> (TrafficShaper, DispatchSemaphore) {
+    private static func parkedShaper(capacity: Int)
+        -> (shaper: TrafficShaper, parked: DispatchSemaphore, releaseAll: () -> Void) {
         let parked = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
         let shaper = TrafficShaper(
@@ -128,7 +129,9 @@ struct TrafficShaperAdmissionTests {
             parked.signal()
             release.wait()
         }
-        return (shaper, parked)
+        // Enough permits for every datagram the ring can hold, otherwise the worker simply
+        // parks again inside the next send and never reaches the stop check.
+        return (shaper, parked, { for _ in 0...(capacity + 1) { release.signal() } })
     }
 
     /// The regression that matters: enqueue must never block the caller. The producer is the
@@ -136,8 +139,11 @@ struct TrafficShaperAdmissionTests {
     /// requires to be constant.
     @Test("A full queue is refused instead of blocking the producer", .timeLimit(.minutes(1)))
     func fullQueueDoesNotBlock() {
-        let (shaper, parked) = Self.parkedShaper(capacity: 4)
-        defer { _ = shaper.stop(drain: false, timeout: 1) }
+        let (shaper, parked, releaseAll) = Self.parkedShaper(capacity: 4)
+        defer {
+            releaseAll()
+            #expect(shaper.stop(drain: false, timeout: 2), "the worker must actually exit")
+        }
 
         var admitted = 0
         for value in UInt8(0)..<UInt8(64) where shaper.enqueue(Data([value]), payloadOctets: 1) {
@@ -152,8 +158,11 @@ struct TrafficShaperAdmissionTests {
 
     @Test("A batch is admitted whole or not at all", .timeLimit(.minutes(1)))
     func batchIsAtomic() {
-        let (shaper, parked) = Self.parkedShaper(capacity: 8)
-        defer { _ = shaper.stop(drain: false, timeout: 1) }
+        let (shaper, parked, releaseAll) = Self.parkedShaper(capacity: 8)
+        defer {
+            releaseAll()
+            #expect(shaper.stop(drain: false, timeout: 2), "the worker must actually exit")
+        }
 
         func batch(_ count: Int) -> [TrafficShaper.PendingDatagram] {
             (0..<count).map { .init(bytes: Data([UInt8($0)]), payloadOctets: 1) }
@@ -171,15 +180,19 @@ struct TrafficShaperAdmissionTests {
 
     @Test("An empty batch is trivially accepted")
     func emptyBatch() {
-        let (shaper, _) = Self.parkedShaper(capacity: 4)
-        defer { _ = shaper.stop(drain: false, timeout: 1) }
+        let (shaper, _, releaseAll) = Self.parkedShaper(capacity: 4)
+        defer {
+            releaseAll()
+            #expect(shaper.stop(drain: false, timeout: 2))
+        }
         #expect(shaper.enqueue([]))
     }
 
     @Test("A stopped shaper refuses everything")
     func stoppedRefuses() {
-        let (shaper, _) = Self.parkedShaper(capacity: 8)
-        _ = shaper.stop(drain: false, timeout: 1)
+        let (shaper, _, releaseAll) = Self.parkedShaper(capacity: 8)
+        releaseAll()
+        #expect(shaper.stop(drain: false, timeout: 2))
         #expect(!shaper.enqueue(Data([0]), payloadOctets: 1))
         #expect(shaper.availableCapacity == 0)
     }
