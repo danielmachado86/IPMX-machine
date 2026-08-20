@@ -99,6 +99,10 @@ do {
 let activeCodec = codec
 let networkThread = Thread {
     let depacketizer = VideoDepacketizer(codec: activeCodec)
+    // Reassembly state is per-SSRC: two senders on one address would make the sequence
+    // tracking read every alternation as a gap. See RTPSourceFilter.
+    var sourceFilter = RTPSourceFilter()
+    var warnedAboutConflict = false
     var lastReport = MonotonicClock.now()
     var packets: UInt64 = 0
 
@@ -108,6 +112,14 @@ let networkThread = Thread {
 
         guard let (header, payload) = RTPHeader.parse(datagram) else {
             Log.debug("dropping a datagram that is not RTP (\(datagram.count) bytes)")
+            continue
+        }
+
+        guard sourceFilter.accept(ssrc: header.ssrc) else {
+            if !warnedAboutConflict, let conflict = sourceFilter.conflictDescription {
+                warnedAboutConflict = true
+                Log.error("warning: \(conflict)")
+            }
             continue
         }
 
@@ -124,9 +136,12 @@ let networkThread = Thread {
         let now = MonotonicClock.now()
         if now - lastReport >= 1.0 {
             lastReport = now
-            let summary = String(format: "%llu decoded, %llu dropped, %llu lost pkts, %llu pkts in",
+            var summary = String(format: "%llu decoded, %llu dropped, %llu lost pkts, %llu pkts in",
                                  decoder.framesDecoded, decoder.framesDropped,
                                  depacketizer.lostPackets, packets)
+            if sourceFilter.rejectedPackets > 0 {
+                summary += String(format: ", %llu from other senders", sourceFilter.rejectedPackets)
+            }
             Log.info(summary)
             DispatchQueue.main.async {
                 player.updateTitle("IPMX Phase 0 \(activeCodec.rawValue) — \(summary)")
