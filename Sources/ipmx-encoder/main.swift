@@ -35,6 +35,8 @@ if options.flag("help") {
       --mtu <bytes>        max RTP payload            (default 1400)
       --max-packet-rate <pps>
                            TR-10-7 MaxRate; default derives conservatively from bitrate and MTU
+      --cmax-headroom <f>  fraction of CMAX the burst is sized to (default 0.875).
+                           1.0 sits exactly on the limit, for boundary testing
       --no-hrd             drop the HRD signalling and its SEI. Non-conformant, debugging only
       --no-rtcp            do not send Sender Reports. Non-conformant, debugging only
       --no-shaping         send each frame as a burst. Non-conformant, debugging only
@@ -120,7 +122,15 @@ guard maxPacketRate > 0 else {
     Log.error("max-packet-rate must be positive")
     exit(1)
 }
-let trafficShapeParameters = TrafficShapeParameters(maxPacketRate: maxPacketRate)
+let headroomFraction = Double(options.string("cmax-headroom",
+                                             default: "\(TrafficShapeParameters.defaultHeadroomFraction)"))
+    ?? TrafficShapeParameters.defaultHeadroomFraction
+guard headroomFraction > 0, headroomFraction <= 1 else {
+    Log.error("cmax-headroom must be in (0, 1]")
+    exit(1)
+}
+let trafficShapeParameters = TrafficShapeParameters(maxPacketRate: maxPacketRate,
+                                                    headroomFraction: headroomFraction)
 
 // TR-10-7 §11: b=AS covers the whole IP packet, so the coded bitrate alone understates it.
 // Derived from the same MaxRate the shaper paces to, so the SDP and the traffic shape describe
@@ -180,7 +190,8 @@ do {
 
     if let shape = sender.trafficShapeSnapshot {
         Log.info("traffic shaping: MaxRate \(Int(maxPacketRate)) packets/s, "
-               + "CMAX \(trafficShapeParameters.cmax), \(shape.state)")
+               + "CMAX \(trafficShapeParameters.cmax), "
+               + "burst \(trafficShapeParameters.burstCapacity), \(shape.state)")
         Log.debug("b=AS:\(advertisedBitrateKbps) = \(bitrateKbps) coded + "
                 + "IP/UDP/RTP headers at MaxRate")
         if case .bestEffort = shape.state {

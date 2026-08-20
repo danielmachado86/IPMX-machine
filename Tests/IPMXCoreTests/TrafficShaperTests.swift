@@ -19,6 +19,32 @@ struct TrafficShaperTests {
         #expect(TrafficShapeParameters(maxPacketRate: maxPacketRate).cmax == expected)
     }
 
+    /// Sitting exactly on CMAX is compliant but has no margin: a loopback measurement put 37%
+    /// of packets at CINST = 16 against a CMAX of 16. Anything bursty downstream then pushes a
+    /// conformant sender over. TR-10-1 §8.1 calls CMAX "the maximum allowed value".
+    @Test("The bucket is sized below CMAX so downstream jitter has somewhere to go", arguments: [
+        (1_193.0, 16, 14),
+        (1_080_000.0, 50, 43),
+    ])
+    func burstCapacityLeavesHeadroom(maxPacketRate: Double, cmax: Int, burst: Int) {
+        let parameters = TrafficShapeParameters(maxPacketRate: maxPacketRate)
+        #expect(parameters.cmax == cmax)
+        #expect(parameters.burstCapacity == burst)
+        #expect(parameters.burstCapacity < parameters.cmax)
+    }
+
+    @Test("A headroom of 1.0 puts the burst exactly on the limit, for boundary testing")
+    func headroomCanBeDisabled() {
+        let atTheLimit = TrafficShapeParameters(maxPacketRate: 1_193, headroomFraction: 1.0)
+        #expect(atTheLimit.burstCapacity == atTheLimit.cmax)
+    }
+
+    @Test("The burst never falls below one packet")
+    func burstNeverReachesZero() {
+        let tiny = TrafficShapeParameters(maxPacketRate: 1, headroomFraction: 0.01)
+        #expect(tiny.burstCapacity >= 1)
+    }
+
     @Test("Bitrate conversion accounts for partial and auxiliary RTP packets")
     func estimatedPacketRate() {
         let estimate = TrafficShapeParameters.estimatedMaxPacketRate(
@@ -33,33 +59,33 @@ struct TrafficShaperTests {
         #expect(measuredOverride.cmax == 16)
     }
 
-    @Test("The initial burst is capped at CMAX and subsequent packets are paced")
+    @Test("The initial burst is capped at the burst capacity, then packets are paced")
     func initialBurstAndPacing() {
         let parameters = TrafficShapeParameters(maxPacketRate: 1_000)
         var bucket = TrafficShapeTokenBucket(parameters: parameters, originNanoseconds: 0)
 
         var deadlines: [UInt64] = []
-        for _ in 0..<(parameters.cmax + 4) {
+        for _ in 0..<(parameters.burstCapacity + 4) {
             deadlines.append(bucket.reserve(nowNanoseconds: 0))
         }
 
-        #expect(deadlines.prefix(parameters.cmax).allSatisfy { $0 == 0 })
-        #expect(deadlines[parameters.cmax] == 1_000_000)
-        #expect(deadlines[parameters.cmax + 1] == 2_000_000)
-        #expect(deadlines[parameters.cmax + 3] == 4_000_000)
+        #expect(deadlines.prefix(parameters.burstCapacity).allSatisfy { $0 == 0 })
+        #expect(deadlines[parameters.burstCapacity] == 1_000_000)
+        #expect(deadlines[parameters.burstCapacity + 1] == 2_000_000)
+        #expect(deadlines[parameters.burstCapacity + 3] == 4_000_000)
     }
 
-    @Test("An idle period refills only up to CMAX")
+    @Test("An idle period refills only up to the burst capacity")
     func refillIsBounded() {
         let parameters = TrafficShapeParameters(maxPacketRate: 2_000)
         var bucket = TrafficShapeTokenBucket(parameters: parameters, originNanoseconds: 0)
 
-        for _ in 0..<parameters.cmax {
+        for _ in 0..<parameters.burstCapacity {
             #expect(bucket.reserve(nowNanoseconds: 0) == 0)
         }
 
         let afterIdle: UInt64 = 10_000_000_000
-        for _ in 0..<parameters.cmax {
+        for _ in 0..<parameters.burstCapacity {
             #expect(bucket.reserve(nowNanoseconds: afterIdle) == afterIdle)
         }
         #expect(bucket.reserve(nowNanoseconds: afterIdle) > afterIdle)

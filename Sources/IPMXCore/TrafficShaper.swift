@@ -9,14 +9,35 @@ import Foundation
 public struct TrafficShapeParameters: Sendable, Equatable {
     public static let cmaxDivisor = 21_600.0
 
+    /// Fraction of CMAX the bucket is actually sized to.
+    ///
+    /// Sizing the bucket at exactly CMAX is compliant but leaves no margin, and it shows: a
+    /// loopback measurement of this sender put 37% of packets at exactly CINST = 16 against a
+    /// CMAX of 16, with an observed peak of 16.11 once measurement bias was included. Anything
+    /// downstream that adds burstiness — CDC-NCM aggregating frames into USB transfers, switch
+    /// queuing, an analyser that rounds differently — then pushes a conformant sender over the
+    /// line. TR-10-1 §8.1 calls CMAX "the maximum allowed value", so staying under it is
+    /// explicitly correct.
+    public static let defaultHeadroomFraction = 0.875
+
     public let maxPacketRate: Double
+
+    /// The normative ceiling, TR-10-7 §10: `CMAX = MAX(16, INT(MaxRate / 21600))`.
     public let cmax: Int
 
-    public init(maxPacketRate: Double) {
+    /// What the token bucket is actually sized to. At or below `cmax`.
+    public let burstCapacity: Int
+
+    public init(maxPacketRate: Double,
+                headroomFraction: Double = defaultHeadroomFraction) {
         precondition(maxPacketRate.isFinite && maxPacketRate > 0,
                      "MaxRate must be a positive finite packet rate")
+        precondition(headroomFraction > 0 && headroomFraction <= 1,
+                     "headroom is a fraction of CMAX, and never above it")
         self.maxPacketRate = maxPacketRate
-        self.cmax = max(16, Int(maxPacketRate / Self.cmaxDivisor))
+        let ceiling = max(16, Int(maxPacketRate / Self.cmaxDivisor))
+        self.cmax = ceiling
+        self.burstCapacity = max(1, Int((Double(ceiling) * headroomFraction).rounded(.down)))
     }
 
     /// Converts a maximum encoded bitrate to a conservative packet-rate target.
@@ -87,9 +108,9 @@ public struct TrafficShaperConfiguration: Sendable, Equatable {
 
 /// Pure token-bucket scheduler used by the real-time worker and by deterministic tests.
 ///
-/// The bucket starts full, allowing at most CMAX packets at one instant. It then refills at
-/// MaxRate tokens per second. This is smoother than emitting repeated CMAX-sized bursts while
-/// preserving the same Network Compatibility Model bound.
+/// The bucket starts full and refills at MaxRate tokens per second. Its size is
+/// `burstCapacity`, which sits deliberately below CMAX so that burstiness added downstream
+/// does not push an otherwise conformant sender over the normative limit.
 public struct TrafficShapeTokenBucket: Sendable {
     public let parameters: TrafficShapeParameters
     private var tokens: Double
@@ -97,7 +118,7 @@ public struct TrafficShapeTokenBucket: Sendable {
 
     public init(parameters: TrafficShapeParameters, originNanoseconds: UInt64) {
         self.parameters = parameters
-        self.tokens = Double(parameters.cmax)
+        self.tokens = Double(parameters.burstCapacity)
         self.lastUpdateNanoseconds = originNanoseconds
     }
 
@@ -105,7 +126,7 @@ public struct TrafficShapeTokenBucket: Sendable {
     public mutating func reserve(nowNanoseconds: UInt64) -> UInt64 {
         if nowNanoseconds > lastUpdateNanoseconds {
             let elapsed = Double(nowNanoseconds - lastUpdateNanoseconds) / 1_000_000_000.0
-            tokens = min(Double(parameters.cmax),
+            tokens = min(Double(parameters.burstCapacity),
                          tokens + elapsed * parameters.maxPacketRate)
             lastUpdateNanoseconds = nowNanoseconds
         }
